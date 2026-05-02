@@ -36,11 +36,22 @@
             && !(pkgs.lib.hasInfix "/.tmp/" path);
         };
 
-        version = "0.0.1";
+        # Single source of truth for the version. `just bump-version` rewrites
+        # this literal; `just release` commits the bump and tags v$VERSION.
+        # The amarbel-llc/nixpkgs fork's buildGoApplication overlay reads
+        # `version` and `commit` and auto-injects them as -X main.version /
+        # -X main.commit ldflags, so `doppelgang version` reports both at
+        # runtime.
+        doppelgangVersion = "0.0.1";
+        # shortRev for clean builds, dirtyShortRev for dirty trees so devshell
+        # builds visibly read `dirty-abcdef` instead of impersonating a release.
+        doppelgangCommit = self.shortRev or self.dirtyShortRev or "unknown";
 
         doppelgang = pkgs.buildGoApplication {
           pname = "doppelgang";
-          inherit version go;
+          version = doppelgangVersion;
+          commit = doppelgangCommit;
+          inherit go;
           src = goSrc;
           modules = ./gomod2nix.toml;
           subPackages = [ "cmd/doppelgang" ];
