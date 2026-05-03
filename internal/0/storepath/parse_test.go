@@ -33,9 +33,9 @@ func TestIsHash(t *testing.T) {
 	}{
 		{"33cw374lsp6s03nnzj3dp63sv23yab84", true},
 		{"00000000000000000000000000000000", true},
-		{"33cw374lsp6s03nnzj3dp63sv23yab8", false}, // 31 chars
+		{"33cw374lsp6s03nnzj3dp63sv23yab8", false},   // 31 chars
 		{"33cw374lsp6s03nnzj3dp63sv23yab84z", false}, // 33 chars
-		{"33CW374lsp6s03nnzj3dp63sv23yab84", false}, // uppercase
+		{"33CW374lsp6s03nnzj3dp63sv23yab84", false},  // uppercase
 		{"go", false},
 		{"", false},
 	}

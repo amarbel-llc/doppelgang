@@ -44,11 +44,11 @@ func TestFindGroupsAndSortsByWasted(t *testing.T) {
 
 func TestFindAttachesParents(t *testing.T) {
 	const (
-		hashRoot   = "00000000000000000000000000000000"
-		hashUserA  = "11111111111111111111111111111111"
-		hashUserB  = "22222222222222222222222222222222"
-		hashDupeA  = "33333333333333333333333333333333"
-		hashDupeB  = "44444444444444444444444444444444"
+		hashRoot  = "00000000000000000000000000000000"
+		hashUserA = "11111111111111111111111111111111"
+		hashUserB = "22222222222222222222222222222222"
+		hashDupeA = "33333333333333333333333333333333"
+		hashDupeB = "44444444444444444444444444444444"
 	)
 	root := "/nix/store/" + hashRoot + "-root"
 	uA := "/nix/store/" + hashUserA + "-userA-1.0"
