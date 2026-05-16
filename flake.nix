@@ -3,8 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:amarbel-llc/nixpkgs";
-    nixpkgs-master.url = "github:NixOS/nixpkgs/e2dde111aea2c0699531dc616112a96cd55ab8b5";
+    nixpkgs-master.url = "github:NixOS/nixpkgs/bb7e5d8ac99f4b9d2527f2355e614d6bb0f3288d";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -13,6 +15,7 @@
       nixpkgs,
       nixpkgs-master,
       utils,
+      treefmt-nix,
     }:
     utils.lib.eachDefaultSystem (
       system:
@@ -32,9 +35,13 @@
             && !(pkgs.lib.hasSuffix "/sweatfile" path)
             && !(pkgs.lib.hasSuffix "/README.md" path)
             && !(pkgs.lib.hasSuffix "/LICENSE" path)
+            && !(pkgs.lib.hasSuffix "/treefmt.nix" path)
             && !(pkgs.lib.hasInfix "/build/" path)
             && !(pkgs.lib.hasInfix "/.tmp/" path);
         };
+
+        # `nix fmt` entry point. Config lives in ./treefmt.nix.
+        treefmtEval = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
 
         # Single source of truth for the version. `just bump-version` rewrites
         # this literal; `just release` commits the bump and tags v$VERSION.
@@ -76,11 +83,12 @@
             pkgs-master.gopls
             pkgs-master.gotools
             pkgs-master.golangci-lint
-            pkgs-master.gofumpt
             pkgs.just
             pkgs.nix
           ];
         };
+
+        formatter = treefmtEval.config.build.wrapper;
       }
     );
 }

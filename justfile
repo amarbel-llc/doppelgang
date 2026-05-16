@@ -15,10 +15,10 @@ test: fmt test-go
 test-go *args:
   go test ./... {{args}}
 
-# Format Go sources in place
-fmt:
-  gofumpt -w .
-  goimports -w .
+# Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
+# `just fmt -- --ci` to fail if anything would change.
+fmt *ARGS:
+  nix fmt -- {{ARGS}}
 
 # Regenerate gomod2nix.toml after go.mod / go.sum changes
 gomod2nix:
