@@ -12,8 +12,11 @@ build-nix:
 # Format + go test
 test: fmt test-go
 
-test-go *args:
-  go test ./... {{args}}
+# Run go test via the flake's checks output so the suite executes in a
+# sandboxed nix build. The check derivation is defined in flake.nix as
+# checks.<system>.go-test.
+test-go:
+  nix flake check --show-trace
 
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.

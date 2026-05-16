@@ -70,11 +70,27 @@
           pwd = ./.;
           inherit go;
         };
+
+        # `go test ./...` exposed as a flake check so `nix flake check`
+        # (and `just test-go`) run the suite in a sandboxed nix build.
+        # subPackages is unset so every package is built and tested, not
+        # just cmd/doppelgang. Stubbing buildPhase breaks goCheckHook
+        # (which depends on goBuildHook's /build/buildFlagsArray), so we
+        # let the standard phases run and just enable doCheck.
+        doppelgangGoTest = doppelgang.overrideAttrs (_old: {
+          pname = "doppelgang-go-test";
+          subPackages = null;
+          doCheck = true;
+        });
       in
       {
         packages = {
           inherit doppelgang;
           default = doppelgang;
+        };
+
+        checks = {
+          go-test = doppelgangGoTest;
         };
 
         devShells.default = pkgs-master.mkShell {
