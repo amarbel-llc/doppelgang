@@ -20,6 +20,11 @@ type Summary struct {
 	TotalBytes int64
 	Groups     []dupes.Group
 	Owners     map[string][]string
+	// Drift, when non-nil, is rendered as an additional section beneath
+	// the exact-duplicate groups. nil means the version-drift pass was
+	// not requested (or was opted out of); empty slice means it ran but
+	// found nothing.
+	Drift []dupes.DriftGroup
 }
 
 // Text writes the human-readable summary used by the CLI.
@@ -39,7 +44,45 @@ func Text(w io.Writer, s Summary) error {
 			}
 		}
 	}
+	return writeDrift(w, s.Drift)
+}
+
+// writeDrift emits the version-drift section. nil drift skips the section
+// entirely; an empty (but non-nil) slice prints a one-line "no drift"
+// confirmation so the reader knows the pass ran.
+func writeDrift(w io.Writer, drift []dupes.DriftGroup) error {
+	if drift == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "\n── Version drift ──\n"); err != nil {
+		return err
+	}
+	if len(drift) == 0 {
+		_, err := fmt.Fprintln(w, "(no pname has more than one version in this closure)")
+		return err
+	}
+	for _, dg := range drift {
+		if _, err := fmt.Fprintf(w, "%s\t%d versions: %s\n",
+			dg.Pname, len(dg.Versions), formatDriftVersions(dg.Versions)); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// formatDriftVersions renders a comma-separated version list with each
+// also-an-exact-dupe version tagged inline, e.g.
+// "21.1.7, 21.1.8 (×2 exact dupe)".
+func formatDriftVersions(vs []dupes.DriftVersion) string {
+	parts := make([]string, 0, len(vs))
+	for _, v := range vs {
+		if v.IsExactDupe {
+			parts = append(parts, fmt.Sprintf("%s (×%d exact dupe)", v.Version, v.Count))
+		} else {
+			parts = append(parts, v.Version)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func attribLine(c dupes.Copy, owners map[string][]string) string {

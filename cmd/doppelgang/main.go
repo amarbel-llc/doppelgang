@@ -55,7 +55,7 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "doppelgang — find duplicate packages in a Nix closure\n\n")
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--json]\n")
+	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
@@ -70,6 +70,7 @@ func dupesMain(ctx context.Context, args []string) int {
 	scopeStr := fs.String("scope", "runtime", "closure scope: runtime or build")
 	top := fs.Int("top", 25, "max duplicate groups to report (0 = all)")
 	byOwner := fs.Bool("by-owner", false, "attribute each copy to top-level installables that reach it")
+	noVersionDrift := fs.Bool("no-version-drift", false, "suppress the pname-grouped version-drift section")
 	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable text")
 	_ = fs.Parse(args)
 
@@ -107,6 +108,9 @@ func dupesMain(ctx context.Context, args []string) int {
 		TotalBytes: totalBytes,
 		Groups:     groups,
 		Owners:     owners,
+	}
+	if !*noVersionDrift {
+		sum.Drift = dupes.FindVersionDrift(g)
 	}
 	if *asJSON {
 		return errExit(render.JSON(os.Stdout, sum))

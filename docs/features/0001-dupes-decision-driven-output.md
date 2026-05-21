@@ -258,6 +258,50 @@ ignore unless storage is tight.
   when the runtime artifact is cached. Document this and prefer
   `--scope runtime` for cost-class triage.
 
+## Relationship to version-drift detection (issue #3)
+
+Issue #3 adds a sibling lens to the `dupes` output: groups of *different
+versions of the same logical derivation* coexisting in the closure
+(e.g. `clang-21.1.7` alongside `clang-21.1.8`). Exact-duplicate
+detection ("two copies with the same name and different hash") and
+version-drift detection ("multiple versions of the same `pname`") are
+distinct signals that motivate distinct levers, so version drift lands
+as its own additive section beneath the existing duplicate list rather
+than being folded into the per-group decision columns this FDR
+specifies.
+
+First-pass grouping is by `pname` only — split a closure-path name at
+its first dash-followed-by-digit, the canonical `lib.parseDrvName`
+rule. This will over-merge across output-suffixed names (`jq-1.8.1-bin`
+vs `jq-1.8.1-dev` parse to the same `pname` with different versions
+`1.8.1-bin` / `1.8.1-dev`) and may need an output-suffix strip pass
+informed by real-closure validation. The FDR does not pre-commit to a
+particular heuristic; the v1 implementation explicitly accepts some
+imprecision and treats validation against `~/eng` as the gating signal.
+
+How this FDR's design composes with the drift section, once both ship:
+
+- **Cost class** generalizes. A drift group whose every version is
+  `cache=hit` is `storage-only`; one with any `local-only` copy is
+  `forced-rebuild`; the rest are `mixed`. Reuses the same vocabulary.
+- **`cache=` and `@owner/repo` attribution** attach to individual
+  versions within a drift group exactly as they do to copies within an
+  exact-duplicate group, so the publisher lever is visible at the
+  same place.
+- **Overlap** between the two sections is intentional and called out
+  inline. A `pname` that has both inter-version drift *and* intra-
+  version duplication appears in both the exact-duplicate list (per
+  version) and the drift list (across versions), with the drift entry
+  annotating which versions are also exact dupes.
+- **Sort key**. Drift groups carry their own weighted-cost score
+  (sum of `narSize × cache_class_weight` across all versions and all
+  copies of each version). The two sections sort independently.
+
+Promotion of this FDR to `proposed` does not block #3; #3 ships first
+as a standalone pname-grouped section, and this FDR's eventual
+implementation extends it with the cache / cost / attribution columns
+above.
+
 ## More Information
 
 - Probe results that established cache hit/miss and publisher
