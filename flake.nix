@@ -23,7 +23,7 @@
         pkgs = import nixpkgs { inherit system; };
         pkgs-master = import nixpkgs-master { inherit system; };
 
-        go = pkgs-master.go_1_26;
+        go = pkgs.go_1_26;
 
         # Exclude non-Go-source paths so edits to docs, justfile, etc. don't
         # bust the derivation hash.
