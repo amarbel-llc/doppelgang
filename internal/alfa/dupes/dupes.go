@@ -99,6 +99,15 @@ type DriftVersion struct {
 	Count       int
 	Size        int64
 	IsExactDupe bool
+	// Parents is the deduplicated, sorted union of immediate referrer
+	// names (hash-stripped) across every path in this version's bucket.
+	// nil when FindVersionDrift was called with parents==nil.
+	Parents []string
+	// Owners is the deduplicated, sorted union of top-level installable
+	// names (hash-stripped) that reach this version. Populated only when
+	// FindVersionDrift was called with a non-nil owners map (typically
+	// from attribute.Compute via --by-owner).
+	Owners []string
 }
 
 // FindVersionDrift groups every path in g by (pname, output-stripped
@@ -107,7 +116,12 @@ type DriftVersion struct {
 // skipped. The exact-dupe overlap flag fires when any full name within
 // a version bucket appears more than once in the closure (i.e. the
 // same name is its own exact-duplicate group in Find's output).
-func FindVersionDrift(g closure.Graph) []DriftGroup {
+//
+// parents (typically from InvertReferences) attaches the union of
+// immediate referrer names to each version when non-nil. owners
+// (typically from attribute.Compute when --by-owner) attaches the
+// union of top-level installable names. Either map may be nil.
+func FindVersionDrift(g closure.Graph, parents map[string][]string, owners map[string][]string) []DriftGroup {
 	type bucketKey struct{ pname, version string }
 	buckets := make(map[bucketKey][]string)
 	for path := range g {
@@ -126,6 +140,8 @@ func FindVersionDrift(g closure.Graph) []DriftGroup {
 	for key, bucketPaths := range buckets {
 		var size, total int64
 		nameCounts := make(map[string]int)
+		parentSet := make(map[string]struct{})
+		ownerSet := make(map[string]struct{})
 		for _, p := range bucketPaths {
 			nameCounts[storepath.Name(p)]++
 			if info, ok := g[p]; ok {
@@ -133,6 +149,16 @@ func FindVersionDrift(g closure.Graph) []DriftGroup {
 					size = info.NarSize
 				}
 				total += info.NarSize
+			}
+			if parents != nil {
+				for _, r := range parents[p] {
+					parentSet[storepath.Name(r)] = struct{}{}
+				}
+			}
+			if owners != nil {
+				for _, o := range owners[p] {
+					ownerSet[o] = struct{}{}
+				}
 			}
 		}
 		isExactDupe := false
@@ -142,12 +168,19 @@ func FindVersionDrift(g closure.Graph) []DriftGroup {
 				break
 			}
 		}
-		versionsByPname[key.pname] = append(versionsByPname[key.pname], DriftVersion{
+		dv := DriftVersion{
 			Version:     key.version,
 			Count:       len(bucketPaths),
 			Size:        size,
 			IsExactDupe: isExactDupe,
-		})
+		}
+		if parents != nil {
+			dv.Parents = sortedKeys(parentSet)
+		}
+		if owners != nil {
+			dv.Owners = sortedKeys(ownerSet)
+		}
+		versionsByPname[key.pname] = append(versionsByPname[key.pname], dv)
 		totalByPname[key.pname] += total
 	}
 
@@ -171,6 +204,16 @@ func FindVersionDrift(g closure.Graph) []DriftGroup {
 		return groups[i].Pname < groups[j].Pname
 	})
 	return groups
+}
+
+// sortedKeys returns the keys of m in lexical order.
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // InvertReferences builds the immediate-referrer map: for each path p,

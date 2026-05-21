@@ -110,7 +110,7 @@ func dupesMain(ctx context.Context, args []string) int {
 		Owners:     owners,
 	}
 	if !*noVersionDrift {
-		sum.Drift = dupes.FindVersionDrift(g)
+		sum.Drift = dupes.FindVersionDrift(g, parents, owners)
 	}
 	if *asJSON {
 		return errExit(render.JSON(os.Stdout, sum))

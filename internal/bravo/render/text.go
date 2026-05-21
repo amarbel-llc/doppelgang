@@ -49,7 +49,10 @@ func Text(w io.Writer, s Summary) error {
 
 // writeDrift emits the version-drift section. nil drift skips the section
 // entirely; an empty (but non-nil) slice prints a one-line "no drift"
-// confirmation so the reader knows the pass ran.
+// confirmation so the reader knows the pass ran. When any drift version
+// carries Parents or Owners, the per-pname output expands into multiline
+// form (header + indented per-version lines) so the attribution is
+// readable; otherwise the compact one-line form is used.
 func writeDrift(w io.Writer, drift []dupes.DriftGroup) error {
 	if drift == nil {
 		return nil
@@ -62,8 +65,51 @@ func writeDrift(w io.Writer, drift []dupes.DriftGroup) error {
 		return err
 	}
 	for _, dg := range drift {
+		if driftHasAttribution(dg) {
+			if err := writeDriftMultiline(w, dg); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := fmt.Fprintf(w, "%s\t%d versions: %s\n",
 			dg.Pname, len(dg.Versions), formatDriftVersions(dg.Versions)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func driftHasAttribution(dg dupes.DriftGroup) bool {
+	for _, v := range dg.Versions {
+		if len(v.Parents) > 0 || len(v.Owners) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// writeDriftMultiline renders one drift pname across multiple lines:
+// header line with pname and version count, followed by an indented
+// line per version with the version tag and either owners (preferred
+// when present) or parents.
+func writeDriftMultiline(w io.Writer, dg dupes.DriftGroup) error {
+	if _, err := fmt.Fprintf(w, "%s\t%d versions:\n", dg.Pname, len(dg.Versions)); err != nil {
+		return err
+	}
+	for _, v := range dg.Versions {
+		tag := v.Version
+		if v.IsExactDupe {
+			tag = fmt.Sprintf("%s (×%d exact dupe)", v.Version, v.Count)
+		}
+		if len(v.Owners) > 0 {
+			if _, err := fmt.Fprintf(w, "    %s  owners: %s\n",
+				tag, truncList(v.Owners, 6)); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "    %s  via %s\n",
+			tag, truncList(v.Parents, 6)); err != nil {
 			return err
 		}
 	}

@@ -70,8 +70,8 @@ func TestTrimOutputSuffix(t *testing.T) {
 		{"0.18-doc", "0.18"},
 		{"2.46-debug", "2.46"},
 		// unknown suffix: keep.
-		{"5.3p9", "5.3p9"},                        // patch-letter, no dash
-		{"2026a", "2026a"},                        // tzdata-style letter
+		{"5.3p9", "5.3p9"}, // patch-letter, no dash
+		{"2026a", "2026a"}, // tzdata-style letter
 		{"1.0.20-unstable-2025-12-31", "1.0.20-unstable-2025-12-31"}, // trailing date segment
 		// no dash at all: keep.
 		{"1.8.1", "1.8.1"},

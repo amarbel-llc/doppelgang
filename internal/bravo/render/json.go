@@ -27,10 +27,12 @@ type jsonDriftGroup struct {
 }
 
 type jsonDriftVersion struct {
-	Version     string `json:"version"`
-	Count       int    `json:"count"`
-	Size        int64  `json:"size"`
-	IsExactDupe bool   `json:"isExactDupe"`
+	Version     string   `json:"version"`
+	Count       int      `json:"count"`
+	Size        int64    `json:"size"`
+	IsExactDupe bool     `json:"isExactDupe"`
+	Parents     []string `json:"parents,omitempty"`
+	Owners      []string `json:"owners,omitempty"`
 }
 
 // JSON writes the summary as a single indented JSON document. When
@@ -83,6 +85,8 @@ func JSON(w io.Writer, s Summary) error {
 					Count:       v.Count,
 					Size:        v.Size,
 					IsExactDupe: v.IsExactDupe,
+					Parents:     v.Parents,
+					Owners:      v.Owners,
 				})
 			}
 			out.VersionDrift = append(out.VersionDrift, jdg)

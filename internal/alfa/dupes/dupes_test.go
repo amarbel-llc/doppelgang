@@ -117,7 +117,7 @@ func TestFindVersionDrift(t *testing.T) {
 		hook:    {Path: hook, NarSize: 1024},
 	}
 
-	drift := FindVersionDrift(g)
+	drift := FindVersionDrift(g, nil, nil)
 	if len(drift) != 2 {
 		t.Fatalf("want 2 drift groups, got %d: %+v", len(drift), drift)
 	}
@@ -174,7 +174,7 @@ func TestFindVersionDriftStripsOutputSuffixes(t *testing.T) {
 		n168:    {Path: n168, NarSize: 1024},
 	}
 
-	drift := FindVersionDrift(g)
+	drift := FindVersionDrift(g, nil, nil)
 	if len(drift) != 1 {
 		t.Fatalf("want only nghttp2 drift (jq collapses to one upstream version), got %d: %+v", len(drift), drift)
 	}
@@ -206,7 +206,7 @@ func TestFindVersionDriftSkipsVersionless(t *testing.T) {
 		"/nix/store/" + h1 + "-setup-hook": {Path: "/nix/store/" + h1 + "-setup-hook", NarSize: 100},
 		"/nix/store/" + h2 + "-foo-1.0":    {Path: "/nix/store/" + h2 + "-foo-1.0", NarSize: 100},
 	}
-	if drift := FindVersionDrift(g); len(drift) != 0 {
+	if drift := FindVersionDrift(g, nil, nil); len(drift) != 0 {
 		t.Errorf("want no drift, got %+v", drift)
 	}
 }
