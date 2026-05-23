@@ -74,6 +74,7 @@ var nixOutputSuffixes = map[string]struct{}{
 	"man":      {},
 	"mount":    {},
 	"npm":      {},
+	"python":   {},
 	"sandbox":  {},
 	"static":   {},
 	"swap":     {},
