@@ -29,7 +29,7 @@ func LintText(w io.Writer, s LintSummary) error {
 	}
 	for _, r := range s.Report.Follows {
 		if _, err := fmt.Fprintf(w, "%s pinned %d× — collapse onto %q:\n",
-			r.Identity, len(r.Lines)+1, r.Canonical); err != nil {
+			r.Identity, r.NodeCount, r.Canonical); err != nil {
 			return err
 		}
 		for _, line := range r.Lines {

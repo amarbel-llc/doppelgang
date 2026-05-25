@@ -46,6 +46,56 @@ func TestFollowsRecForIdenticalSource(t *testing.T) {
 	}
 }
 
+// shadowingLock: two duplicate-source identity groups whose redundant
+// paths are nested. Group sha-X has members at [a,x] and [b]; group
+// sha-Y has members at [a,x,y] and [c]. Lint should emit
+// `inputs.a.inputs.x.follows = "b"` for sha-X and would emit
+// `inputs.a.inputs.x.inputs.y.follows = "c"` for sha-Y — but the
+// latter's path has a/x as a strict prefix, which is itself a redundant
+// path in the same output. Path-prefix shadow-pruning drops it.
+const shadowingLock = `{
+  "nodes": {
+    "root": { "inputs": { "a": "a", "b": "b", "c": "c" } },
+    "a": {
+      "inputs": { "x": "aX" },
+      "locked": { "type": "github", "owner": "o", "repo": "a", "rev": "aaa", "narHash": "sha-a" }
+    },
+    "aX": {
+      "inputs": { "y": "aXy" },
+      "locked": { "type": "github", "owner": "o", "repo": "x", "rev": "xxx", "narHash": "sha-X" }
+    },
+    "aXy": {
+      "locked": { "type": "github", "owner": "o", "repo": "y", "rev": "yyy", "narHash": "sha-Y" }
+    },
+    "b": {
+      "locked": { "type": "github", "owner": "o", "repo": "x", "rev": "xxx", "narHash": "sha-X" }
+    },
+    "c": {
+      "locked": { "type": "github", "owner": "o", "repo": "y", "rev": "yyy", "narHash": "sha-Y" }
+    }
+  },
+  "root": "root",
+  "version": 7
+}`
+
+func TestFollowsRecPrunesPathPrefixShadow(t *testing.T) {
+	l, err := flakelock.Parse([]byte(shadowingLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := Analyze(l)
+	if len(r.Follows) != 1 {
+		t.Fatalf("want 1 follows rec after shadow-prune, got %d: %+v", len(r.Follows), r.Follows)
+	}
+	rec := r.Follows[0]
+	if len(rec.Lines) != 1 {
+		t.Fatalf("want 1 line, got %d: %+v", len(rec.Lines), rec.Lines)
+	}
+	if rec.Lines[0] != `inputs.a.inputs.x.follows = "b"` {
+		t.Errorf("Lines[0] = %q, want inputs.a.inputs.x.follows = \"b\"", rec.Lines[0])
+	}
+}
+
 // multiVersionLock: two distinct revs of NixOS/nixpkgs reachable from root.
 const multiVersionLock = `{
   "nodes": {
@@ -80,6 +130,55 @@ func TestMultiVersionInput(t *testing.T) {
 	// Different revs of the same repo are highlighted, never auto-collapsed.
 	if len(r.Follows) != 0 {
 		t.Errorf("want no follows recs for distinct revs, got %+v", r.Follows)
+	}
+}
+
+// testdata/madder_with_duplicates.flake.lock is a frozen snapshot of
+// amarbel-llc/madder@master's flake.lock (34 nodes, 9 duplicate-source
+// identity groups, deeply nested input paths via tap+tommy). It is the
+// realistic fixture for path-prefix shadow-pruning: an unpruned emitter
+// would surface 19 lines across the 9 groups, while the shadow-pruned
+// emitter produces exactly the 9 un-shadowed lines below — verified by
+// applying them to madder's flake.nix and re-locking (34 → 15 nodes,
+// no residual lint findings).
+func TestAnalyzeMadderFlakeLock(t *testing.T) {
+	b, err := os.ReadFile("testdata/madder_with_duplicates.flake.lock")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	l, err := flakelock.Parse(b)
+	if err != nil {
+		t.Fatalf("Parse fixture: %v", err)
+	}
+	r := Analyze(l)
+
+	want := map[string]bool{
+		`inputs.nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master"`: false,
+		`inputs.utils.inputs.systems.follows = "nixpkgs/systems"`:         false,
+		`inputs.tommy.inputs.bats.follows = "bats"`:                       false,
+		`inputs.tommy.inputs.tap.follows = "tap"`:                         false,
+		`inputs.tap.inputs.bats.follows = "bats"`:                         false,
+		`inputs.tap.inputs.treefmt-nix.follows = "nixpkgs/treefmt-nix"`:   false,
+		`inputs.tap.inputs.crane.follows = "purse-first/crane"`:           false,
+		`inputs.tap.inputs.gomod2nix.follows = "purse-first/gomod2nix"`:   false,
+		`inputs.tap.inputs.rust-overlay.follows = "purse-first/rust-overlay"`: false,
+	}
+	got := 0
+	for _, rec := range r.Follows {
+		for _, line := range rec.Lines {
+			got++
+			if _, ok := want[line]; ok {
+				want[line] = true
+			}
+		}
+	}
+	if got != 9 {
+		t.Errorf("got %d follows lines, want 9 (the un-shadowed minimum): %+v", got, r.Follows)
+	}
+	for line, seen := range want {
+		if !seen {
+			t.Errorf("missing expected follows line: %s", line)
+		}
 	}
 }
 

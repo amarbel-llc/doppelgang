@@ -27,9 +27,16 @@ type FollowsRec struct {
 	// Canonical is the follows target: the attr-path of the node the
 	// others should follow, rendered slash-joined (e.g. "nixpkgs/systems").
 	Canonical string
-	// Lines are the concrete flake.nix edits to add, one per redundant
-	// node, e.g. `inputs.nixpkgs.inputs.systems.follows = "..."`.
+	// Lines are the concrete flake.nix edits to add, one per *un-shadowed*
+	// redundant node, e.g. `inputs.nixpkgs.inputs.systems.follows = "..."`.
 	Lines []string
+	// NodeCount is the total number of nodes sharing this identity in
+	// the lockfile (canonical + every redundant member, including those
+	// whose follows line was shadow-pruned and so does not appear in
+	// Lines). The renderer uses this for the "pinned N×" header so the
+	// count reflects the true duplication rather than the post-prune
+	// emit count.
+	NodeCount int
 }
 
 // MultiVersionInput flags a source repository pinned at more than one rev
@@ -75,7 +82,15 @@ func Analyze(l *flakelock.Lock) Report {
 }
 
 // followsRecs groups reachable, pinned nodes by exact source identity and
-// emits a recommendation per group with more than one member.
+// emits a recommendation per group with more than one member. Output is
+// shadow-pruned: a redundant-node line is dropped when a strict prefix of
+// its path is itself a redundant-node line in the same output, because
+// applying the outer follows collapses the path it would override. A
+// group whose every line is shadowed is omitted entirely. This is a
+// structural pass; it does not verify that the resulting lockfile is
+// duplicate-free (the canonical's own sub-inputs may not align), so a
+// re-run after applying the suggestions can still surface residual
+// duplicates as new findings.
 func followsRecs(nodes []pinned, indeg map[string]int) []FollowsRec {
 	byIdentity := map[string][]pinned{}
 	for _, p := range nodes {
@@ -86,23 +101,51 @@ func followsRecs(nodes []pinned, indeg map[string]int) []FollowsRec {
 		byIdentity[id] = append(byIdentity[id], p)
 	}
 
-	recs := make([]FollowsRec, 0)
+	type sortedGroup struct {
+		canonical pinned
+		members   []pinned
+	}
+	groups := make([]sortedGroup, 0, len(byIdentity))
+	redundantPaths := map[string]bool{}
 	for _, group := range byIdentity {
 		if len(group) < 2 {
 			continue
 		}
 		sort.Slice(group, func(i, j int) bool { return less(group[i].path, group[j].path) })
-		canonical := group[0]
-		rec := FollowsRec{
-			Identity:  describe(canonical.lk),
-			Canonical: joinSlash(canonical.path),
+		groups = append(groups, sortedGroup{canonical: group[0], members: group[1:]})
+		for _, m := range group[1:] {
+			redundantPaths[joinSlash(m.path)] = true
 		}
-		for _, d := range group[1:] {
-			line := followsLine(d.path, canonical.path)
-			if indeg[d.key] > 1 {
+	}
+
+	isShadowed := func(p []string) bool {
+		for i := 1; i < len(p); i++ {
+			if redundantPaths[joinSlash(p[:i])] {
+				return true
+			}
+		}
+		return false
+	}
+
+	recs := make([]FollowsRec, 0, len(groups))
+	for _, g := range groups {
+		rec := FollowsRec{
+			Identity:  describe(g.canonical.lk),
+			Canonical: joinSlash(g.canonical.path),
+			NodeCount: 1 + len(g.members),
+		}
+		for _, m := range g.members {
+			if isShadowed(m.path) {
+				continue
+			}
+			line := followsLine(m.path, g.canonical.path)
+			if indeg[m.key] > 1 {
 				line += "   # node has multiple parents; repeat for each"
 			}
 			rec.Lines = append(rec.Lines, line)
+		}
+		if len(rec.Lines) == 0 {
+			continue
 		}
 		recs = append(recs, rec)
 	}
