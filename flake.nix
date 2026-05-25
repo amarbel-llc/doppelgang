@@ -3,8 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:amarbel-llc/nixpkgs";
+    nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master";
+    nixpkgs.inputs.treefmt-nix.follows = "treefmt-nix";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
+    utils.inputs.systems.follows = "nixpkgs/systems";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
