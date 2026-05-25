@@ -3,6 +3,8 @@ package render
 import (
 	"encoding/json"
 	"io"
+
+	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
 )
 
 type jsonGroup struct {
@@ -71,28 +73,36 @@ func JSON(w io.Writer, s Summary) error {
 		}
 		out.Duplicates = append(out.Duplicates, jg)
 	}
-	if s.Drift != nil {
-		out.VersionDrift = make([]jsonDriftGroup, 0, len(s.Drift))
-		for _, dg := range s.Drift {
-			jdg := jsonDriftGroup{
-				Pname:      dg.Pname,
-				TotalBytes: dg.TotalBytes,
-				Versions:   make([]jsonDriftVersion, 0, len(dg.Versions)),
-			}
-			for _, v := range dg.Versions {
-				jdg.Versions = append(jdg.Versions, jsonDriftVersion{
-					Version:     v.Version,
-					Count:       v.Count,
-					Size:        v.Size,
-					IsExactDupe: v.IsExactDupe,
-					Parents:     v.Parents,
-					Owners:      v.Owners,
-				})
-			}
-			out.VersionDrift = append(out.VersionDrift, jdg)
-		}
-	}
+	out.VersionDrift = driftToJSON(s.Drift)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// driftToJSON converts a slice of drift groups into their JSON shape.
+// Returns nil when drift is nil so the enclosing field stays omitted.
+func driftToJSON(drift []dupes.DriftGroup) []jsonDriftGroup {
+	if drift == nil {
+		return nil
+	}
+	out := make([]jsonDriftGroup, 0, len(drift))
+	for _, dg := range drift {
+		jdg := jsonDriftGroup{
+			Pname:      dg.Pname,
+			TotalBytes: dg.TotalBytes,
+			Versions:   make([]jsonDriftVersion, 0, len(dg.Versions)),
+		}
+		for _, v := range dg.Versions {
+			jdg.Versions = append(jdg.Versions, jsonDriftVersion{
+				Version:     v.Version,
+				Count:       v.Count,
+				Size:        v.Size,
+				IsExactDupe: v.IsExactDupe,
+				Parents:     v.Parents,
+				Owners:      v.Owners,
+			})
+		}
+		out = append(out, jdg)
+	}
+	return out
 }

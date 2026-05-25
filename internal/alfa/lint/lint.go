@@ -48,6 +48,7 @@ type InputVersion struct {
 
 // pinned is a reachable node that carries a Locked pin.
 type pinned struct {
+	key  string
 	path []string
 	lk   *flakelock.Locked
 }
@@ -63,38 +64,26 @@ func Analyze(l *flakelock.Lock) Report {
 			continue
 		}
 		if n := l.Nodes[key]; n.Locked != nil {
-			nodes = append(nodes, pinned{path: path, lk: n.Locked})
+			nodes = append(nodes, pinned{key: key, path: path, lk: n.Locked})
 		}
 	}
 
 	return Report{
-		Follows:      followsRecs(l, paths, indeg),
+		Follows:      followsRecs(nodes, indeg),
 		MultiVersion: multiVersion(nodes),
 	}
 }
 
 // followsRecs groups reachable, pinned nodes by exact source identity and
 // emits a recommendation per group with more than one member.
-func followsRecs(l *flakelock.Lock, paths map[string][]string, indeg map[string]int) []FollowsRec {
-	type member struct {
-		key  string
-		path []string
-		lk   *flakelock.Locked
-	}
-	byIdentity := map[string][]member{}
-	for key, path := range paths {
-		if key == l.Root {
-			continue
-		}
-		n := l.Nodes[key]
-		if n.Locked == nil {
-			continue
-		}
-		id := identity(n.Locked)
+func followsRecs(nodes []pinned, indeg map[string]int) []FollowsRec {
+	byIdentity := map[string][]pinned{}
+	for _, p := range nodes {
+		id := identity(p.lk)
 		if id == "" {
 			continue
 		}
-		byIdentity[id] = append(byIdentity[id], member{key, path, n.Locked})
+		byIdentity[id] = append(byIdentity[id], p)
 	}
 
 	recs := make([]FollowsRec, 0)

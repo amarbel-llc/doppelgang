@@ -96,27 +96,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		}
 		out.MultiVersion = append(out.MultiVersion, jm)
 	}
-	if s.Drift != nil {
-		out.VersionDrift = make([]jsonDriftGroup, 0, len(s.Drift))
-		for _, dg := range s.Drift {
-			jdg := jsonDriftGroup{
-				Pname:      dg.Pname,
-				TotalBytes: dg.TotalBytes,
-				Versions:   make([]jsonDriftVersion, 0, len(dg.Versions)),
-			}
-			for _, v := range dg.Versions {
-				jdg.Versions = append(jdg.Versions, jsonDriftVersion{
-					Version:     v.Version,
-					Count:       v.Count,
-					Size:        v.Size,
-					IsExactDupe: v.IsExactDupe,
-					Parents:     v.Parents,
-					Owners:      v.Owners,
-				})
-			}
-			out.VersionDrift = append(out.VersionDrift, jdg)
-		}
-	}
+	out.VersionDrift = driftToJSON(s.Drift)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
