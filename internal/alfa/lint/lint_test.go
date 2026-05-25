@@ -153,14 +153,14 @@ func TestAnalyzeMadderFlakeLock(t *testing.T) {
 	r := Analyze(l)
 
 	want := map[string]bool{
-		`inputs.nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master"`: false,
-		`inputs.utils.inputs.systems.follows = "nixpkgs/systems"`:         false,
-		`inputs.tommy.inputs.bats.follows = "bats"`:                       false,
-		`inputs.tommy.inputs.tap.follows = "tap"`:                         false,
-		`inputs.tap.inputs.bats.follows = "bats"`:                         false,
-		`inputs.tap.inputs.treefmt-nix.follows = "nixpkgs/treefmt-nix"`:   false,
-		`inputs.tap.inputs.crane.follows = "purse-first/crane"`:           false,
-		`inputs.tap.inputs.gomod2nix.follows = "purse-first/gomod2nix"`:   false,
+		`inputs.nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master"`:     false,
+		`inputs.utils.inputs.systems.follows = "nixpkgs/systems"`:             false,
+		`inputs.tommy.inputs.bats.follows = "bats"`:                           false,
+		`inputs.tommy.inputs.tap.follows = "tap"`:                             false,
+		`inputs.tap.inputs.bats.follows = "bats"`:                             false,
+		`inputs.tap.inputs.treefmt-nix.follows = "nixpkgs/treefmt-nix"`:       false,
+		`inputs.tap.inputs.crane.follows = "purse-first/crane"`:               false,
+		`inputs.tap.inputs.gomod2nix.follows = "purse-first/gomod2nix"`:       false,
 		`inputs.tap.inputs.rust-overlay.follows = "purse-first/rust-overlay"`: false,
 	}
 	got := 0
