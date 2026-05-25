@@ -83,17 +83,20 @@ func TestMultiVersionInput(t *testing.T) {
 	}
 }
 
-// The repo's own flake.lock is a realistic fixture: it carries three
-// duplicate-source node pairs (nixpkgs-master, systems, treefmt-nix) that
-// follows would collapse, and no same-repo-different-rev inputs.
+// testdata/repo_with_duplicates.flake.lock is a frozen snapshot of this
+// repo's flake.lock before the follows in flake.nix collapsed three
+// duplicate-source node pairs (nixpkgs-master, systems, treefmt-nix).
+// Exercises canonical-selection with multi-member groups and confirms
+// NixOS/nixpkgs vs amarbel-llc/nixpkgs do not collide as multi-version
+// inputs (distinct repos).
 func TestAnalyzeRepoFlakeLock(t *testing.T) {
-	b, err := os.ReadFile("../../../flake.lock")
+	b, err := os.ReadFile("testdata/repo_with_duplicates.flake.lock")
 	if err != nil {
-		t.Skipf("repo flake.lock unavailable: %v", err)
+		t.Fatalf("read fixture: %v", err)
 	}
 	l, err := flakelock.Parse(b)
 	if err != nil {
-		t.Fatalf("Parse repo flake.lock: %v", err)
+		t.Fatalf("Parse fixture: %v", err)
 	}
 	r := Analyze(l)
 
