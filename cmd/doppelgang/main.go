@@ -11,9 +11,11 @@ import (
 	"strings"
 
 	"github.com/friedenberg/doppelgang/internal/0/closure"
+	"github.com/friedenberg/doppelgang/internal/0/flakelock"
 	"github.com/friedenberg/doppelgang/internal/0/storepath"
 	"github.com/friedenberg/doppelgang/internal/alfa/attribute"
 	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
+	"github.com/friedenberg/doppelgang/internal/alfa/lint"
 	"github.com/friedenberg/doppelgang/internal/bravo/render"
 )
 
@@ -41,6 +43,8 @@ func main() {
 		os.Exit(dupesMain(ctx, flag.Args()[1:]))
 	case "why":
 		os.Exit(whyMain(ctx, flag.Args()[1:]))
+	case "lint":
+		os.Exit(lintMain(ctx, flag.Args()[1:]))
 	case "version":
 		fmt.Printf("doppelgang %s (%s)\n", version, commit)
 		return
@@ -57,8 +61,13 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--installable ./result] [--scope runtime|build]\n")
+	fmt.Fprintf(os.Stderr, "                  [--no-closure] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
+	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
+	fmt.Fprintf(os.Stderr, "inputs, flags inputs pinned at multiple revs, and (unless --no-closure) appends\n")
+	fmt.Fprintf(os.Stderr, "the closure version-drift section from `dupes`.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -116,6 +125,44 @@ func dupesMain(ctx context.Context, args []string) int {
 		return errExit(render.JSON(os.Stdout, sum))
 	}
 	return errExit(render.Text(os.Stdout, sum))
+}
+
+func lintMain(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("lint", flag.ExitOnError)
+	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
+	installable := fs.String("installable", "./result", "Nix installable for the closure version-drift pass")
+	scopeStr := fs.String("scope", "runtime", "closure scope: runtime or build")
+	noClosure := fs.Bool("no-closure", false, "skip the closure version-drift pass")
+	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable text")
+	_ = fs.Parse(args)
+
+	lock, err := flakelock.Load(*flakeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
+		return 1
+	}
+	sum := render.LintSummary{Report: lint.Analyze(lock)}
+
+	// The closure version-drift pass is advisory: a lint run is useful in an
+	// unbuilt checkout, so a missing/unresolvable installable warns and is
+	// skipped rather than failing the command.
+	if !*noClosure {
+		scope, err := parseScope(*scopeStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang: %v\n", err)
+			return 2
+		}
+		if _, g, err := closure.Load(ctx, *installable, scope); err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint: skipping closure version-drift (%v)\n", err)
+		} else {
+			sum.Drift = dupes.FindVersionDrift(g, dupes.InvertReferences(g), nil)
+		}
+	}
+
+	if *asJSON {
+		return errExit(render.LintJSON(os.Stdout, sum))
+	}
+	return errExit(render.LintText(os.Stdout, sum))
 }
 
 func whyMain(ctx context.Context, args []string) int {

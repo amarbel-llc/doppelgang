@@ -10,6 +10,8 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
                  [--top N] [--by-owner] [--json]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
+doppelgang lint [--flake .] [--installable ./result] [--scope runtime|build]
+                [--no-closure] [--json]
 doppelgang version
 ```
 
@@ -32,6 +34,22 @@ top-level installables (direct references of the root) that reach each copy
 In `--scope build` (the default), `--derivation` is passed to `why-depends`
 so build-time-only paths like setup hooks (`install-shell-files`,
 `goBuildHook`) are reachable. `--scope runtime` traces output paths only.
+
+`lint` reads `<flake>/flake.lock` and surfaces reducible input duplication:
+
+- **follows opportunities** — nodes that pin a byte-identical source (same
+  `narHash`/`rev`) more than once. For each, `lint` prints the concrete
+  `inputs.X.follows = "Y"` line(s) to add to collapse them onto one node.
+- **multi-version inputs** — a single `owner/repo` pinned at more than one
+  revision. These are highlighted but never auto-collapsed, since choosing a
+  revision changes behavior.
+
+The flake.lock analysis is offline (no `nix` invocation). Unless `--no-closure`
+is passed, `lint` also runs the `dupes` version-drift pass over the realized
+closure (`--installable`/`--scope`) and appends its section; if the installable
+can't be resolved (e.g. no `./result`), that pass is skipped with a warning and
+`lint` still reports the flake.lock findings. A missing `flake.lock` is a hard
+error. See `docs/features/0002-lint-follows-and-multiversion.md`.
 
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.
