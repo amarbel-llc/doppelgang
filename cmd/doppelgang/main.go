@@ -67,7 +67,8 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
 	fmt.Fprintf(os.Stderr, "inputs, flags inputs pinned at multiple revs, and (unless --no-closure) appends\n")
-	fmt.Fprintf(os.Stderr, "the closure version-drift section from `dupes`.\n")
+	fmt.Fprintf(os.Stderr, "the closure version-drift section from `dupes`. Exits 1 when any follows or\n")
+	fmt.Fprintf(os.Stderr, "multi-version finding is reported, so it can serve as a CI gate.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -159,10 +160,23 @@ func lintMain(ctx context.Context, args []string) int {
 		}
 	}
 
+	var renderErr error
 	if *asJSON {
-		return errExit(render.LintJSON(os.Stdout, sum))
+		renderErr = render.LintJSON(os.Stdout, sum)
+	} else {
+		renderErr = render.LintText(os.Stdout, sum)
 	}
-	return errExit(render.LintText(os.Stdout, sum))
+	if renderErr != nil {
+		return errExit(renderErr)
+	}
+
+	// Exit non-zero when actionable findings exist so `lint` can serve
+	// as a CI gate. Closure drift is observational and does not affect
+	// the exit code.
+	if len(sum.Report.Follows) > 0 || len(sum.Report.MultiVersion) > 0 {
+		return 1
+	}
+	return 0
 }
 
 func whyMain(ctx context.Context, args []string) int {

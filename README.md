@@ -51,6 +51,10 @@ can't be resolved (e.g. no `./result`), that pass is skipped with a warning and
 `lint` still reports the flake.lock findings. A missing `flake.lock` is a hard
 error. See `docs/features/0002-lint-follows-and-multiversion.md`.
 
+`lint` exits `1` when any follows or multi-version finding is reported, so it
+can run in CI as a gate against new input duplication. The closure version-drift
+section is observational and does not affect the exit code.
+
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.
 
