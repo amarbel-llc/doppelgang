@@ -1,5 +1,5 @@
-# Build, format, test
-default: build test
+# Build, format, test, self-lint
+default: build test lint
 
 # Build via nix only — there is no `build-go` recipe. The amarbel-llc/nixpkgs
 # fork's buildGoApplication overlay burns the version + commit into the
@@ -17,6 +17,15 @@ test: fmt test-go
 # checks.<system>.go-test.
 test-go:
   nix flake check --show-trace
+
+# Self-consume: run `doppelgang lint` against this repo's own flake.lock.
+# Surfaces follows opportunities and multi-version inputs in our own
+# inputs. Informational — exit status reflects the binary's exit, which
+# is 0 even when findings are reported.
+lint: lint-nix
+
+lint-nix: build-nix
+  ./result/bin/doppelgang lint
 
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.
