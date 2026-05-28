@@ -89,13 +89,14 @@ not count toward the summary, per the schema. The document is always
 `valid: true` and `bailed: false`: `lint` generates records rather than
 transforming a TAP stream, so there are no parse diagnostics.
 
-The `plan` record is a deliberate extension beyond tap RFC 0001 (which defines
-only `test`/`bailout`/`summary` and forbids other record types). `lint` emits
-`{"type":"plan","count":2}` as the first line, treating its fixed two checks as
-a `1..2` plan; this is tracked upstream by amarbel-llc/tap#30, and `lint` will
-reconcile the record shape with whatever that issue formalizes. Because the
-schema's compatibility rules require consumers to ignore unrecognized record
-types, the extension is backward-safe for existing consumers.
+The `plan` record is normative in the tap NDJSON schema (`tap-ndjson(7)`): a
+producer that knows its plan up front SHOULD emit it as the first record, and
+when both a plan record and a summary are present, `plan_count` MUST equal the
+plan record's `count`. `lint` always runs exactly two checks, so it emits
+`{"type":"plan","count":2}` as the first line and reports `plan_count: 2` in the
+summary. (The plan record was formalized via amarbel-llc/tap#30, which also
+moved the whole schema from the proposed RFC 0001 into the `tap-ndjson(7)`
+manpage; `lint`'s output was already aligned with the result.)
 
 ### Offline; no closure pass
 
@@ -147,7 +148,7 @@ deeper, transitively-pinned copy is the one redirected.
 - **Rendering** (`internal/bravo/render`): `LintText` / `LintJSON` /
   `LintNDJSON` consume the `lint.Report`. `lintMain` picks one via `--format`
   (defaulting to `text` on a TTY, `ndjson` otherwise). The NDJSON renderer
-  maps the report onto the amarbel-llc/tap test-result schema (RFC 0001).
+  maps the report onto the amarbel-llc/tap test-result schema (`tap-ndjson(7)`).
 
 ## Limitations
 
@@ -180,8 +181,9 @@ for `dupes` (and which issue #1 gates).
 - Issue #4 (this feature request).
 - Existing implementation reused: `internal/0/flakelock` (lockfile parser),
   `internal/bravo/render` (`shortRev`, `truncList`).
-- NDJSON output conforms to the amarbel-llc/tap test-result schema
-  (`docs/rfcs/0001-test-result-ndjson-schema.md` in that repo).
+- NDJSON output conforms to the amarbel-llc/tap test-result schema,
+  normatively specified in the `tap-ndjson(7)` manpage (amarbel-llc/tap;
+  `docs/rfcs/0001-test-result-ndjson-schema.md` is a superseded redirect stub).
 - Live fixture: this repo's `flake.lock` carries three duplicate-source node
   pairs (`nixpkgs-master`, `systems`, `treefmt-nix`) exercised by the lint
   package tests.

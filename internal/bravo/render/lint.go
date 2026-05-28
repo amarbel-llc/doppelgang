@@ -98,7 +98,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 }
 
 // ndjsonTest is one record in the amarbel-llc/tap test-result NDJSON
-// schema (RFC 0001). `lint` maps its two checks onto top-level test
+// schema (tap-ndjson(7)). `lint` maps its two checks onto top-level test
 // points and each finding onto a nested subtest; Directive and Output are
 // always null here because lint findings have neither concept.
 type ndjsonTest struct {
@@ -113,13 +113,12 @@ type ndjsonTest struct {
 	Line        int          `json:"line"`
 }
 
-// ndjsonPlan is a leading record announcing how many top-level test points
-// the document will contain, mirroring TAP's `1..N` plan line. This record
-// type is NOT yet part of the tap NDJSON schema (RFC 0001 defines only
-// test/bailout/summary); lint emits it as a deliberate pre-standardization
-// extension tracked by amarbel-llc/tap#30. Consumers that predate the
-// extension ignore unrecognized record types per the schema's compatibility
-// rules.
+// ndjsonPlan is the leading record announcing how many top-level test
+// points the document will contain, mirroring TAP's `1..N` plan line. It
+// is a normative record type in the tap NDJSON schema (tap-ndjson(7)): a
+// producer that knows its plan up front SHOULD emit the plan record first,
+// and the summary's plan_count MUST equal this count. lint always runs
+// exactly two checks, so it emits the plan unconditionally.
 type ndjsonPlan struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`

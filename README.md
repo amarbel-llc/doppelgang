@@ -49,16 +49,15 @@ The analysis is entirely offline (no `nix` invocation); it reads only
 
 `--format` (default `auto`) selects the output: `text` is the bordered
 human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON schema
-(one JSON record per line — a leading `plan` record, the two checks as
-top-level test points each with their findings as nested subtests, and a
-trailing `summary` record); `json` is a single indented JSON document. `auto`
-emits `text` when stdout is a TTY and `ndjson` otherwise, so piping or
+(`tap-ndjson(7)`) — one JSON record per line: a leading `plan` record, the two
+checks as top-level test points each with their findings as nested subtests,
+and a trailing `summary` record; `json` is a single indented JSON document.
+`auto` emits `text` when stdout is a TTY and `ndjson` otherwise, so piping or
 redirecting `lint` yields machine-readable output without a flag.
 
-The leading `{"type":"plan","count":2}` record is a deliberate extension beyond
-tap RFC 0001 (which defines only `test`/`bailout`/`summary`); it is tracked
-upstream by amarbel-llc/tap#30 and lint will track whatever shape that issue
-settles on.
+The leading `{"type":"plan","count":2}` record is the schema's normative plan
+record: lint knows its fixed two checks up front, so it announces them as the
+first record, and the summary's `plan_count` matches that count.
 
 `lint` exits `1` when any follows or multi-version finding is reported, so it
 can run in CI as a gate against new input duplication.
