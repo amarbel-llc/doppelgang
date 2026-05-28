@@ -44,7 +44,7 @@ func main() {
 	case "why":
 		os.Exit(whyMain(ctx, flag.Args()[1:]))
 	case "lint":
-		os.Exit(lintMain(ctx, flag.Args()[1:]))
+		os.Exit(lintMain(flag.Args()[1:]))
 	case "version":
 		fmt.Printf("doppelgang %s (%s)\n", version, commit)
 		return
@@ -61,14 +61,13 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--installable ./result] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "                  [--no-closure] [--json]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
-	fmt.Fprintf(os.Stderr, "inputs, flags inputs pinned at multiple revs, and (unless --no-closure) appends\n")
-	fmt.Fprintf(os.Stderr, "the closure version-drift section from `dupes`. Exits 1 when any follows or\n")
-	fmt.Fprintf(os.Stderr, "multi-version finding is reported, so it can serve as a CI gate.\n")
+	fmt.Fprintf(os.Stderr, "inputs and flags inputs pinned at multiple revs. Exits 1 when any follows or\n")
+	fmt.Fprintf(os.Stderr, "multi-version finding is reported, so it can serve as a CI gate. --format=auto\n")
+	fmt.Fprintf(os.Stderr, "(the default) emits text on a TTY and tap NDJSON (amarbel-llc/tap) otherwise.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -128,14 +127,17 @@ func dupesMain(ctx context.Context, args []string) int {
 	return errExit(render.Text(os.Stdout, sum))
 }
 
-func lintMain(ctx context.Context, args []string) int {
+func lintMain(args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ExitOnError)
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
-	installable := fs.String("installable", "./result", "Nix installable for the closure version-drift pass")
-	scopeStr := fs.String("scope", "runtime", "closure scope: runtime or build")
-	noClosure := fs.Bool("no-closure", false, "skip the closure version-drift pass")
-	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable text")
+	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
 	_ = fs.Parse(args)
+
+	resolved, err := resolveLintFormat(*format, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
+		return 2
+	}
 
 	lock, err := flakelock.Load(*flakeDir)
 	if err != nil {
@@ -144,39 +146,53 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 	sum := render.LintSummary{Report: lint.Analyze(lock)}
 
-	// The closure version-drift pass is advisory: a lint run is useful in an
-	// unbuilt checkout, so a missing/unresolvable installable warns and is
-	// skipped rather than failing the command.
-	if !*noClosure {
-		scope, err := parseScope(*scopeStr)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "doppelgang: %v\n", err)
-			return 2
-		}
-		if _, g, err := closure.Load(ctx, *installable, scope); err != nil {
-			fmt.Fprintf(os.Stderr, "doppelgang lint: skipping closure version-drift (%v)\n", err)
-		} else {
-			sum.Drift = dupes.FindVersionDrift(g, dupes.InvertReferences(g), nil)
-		}
-	}
-
 	var renderErr error
-	if *asJSON {
-		renderErr = render.LintJSON(os.Stdout, sum)
-	} else {
+	switch resolved {
+	case "text":
 		renderErr = render.LintText(os.Stdout, sum)
+	case "json":
+		renderErr = render.LintJSON(os.Stdout, sum)
+	case "ndjson":
+		renderErr = render.LintNDJSON(os.Stdout, sum)
 	}
 	if renderErr != nil {
 		return errExit(renderErr)
 	}
 
 	// Exit non-zero when actionable findings exist so `lint` can serve
-	// as a CI gate. Closure drift is observational and does not affect
-	// the exit code.
+	// as a CI gate.
 	if len(sum.Report.Follows) > 0 || len(sum.Report.MultiVersion) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// resolveLintFormat maps the --format value to a concrete renderer. "auto"
+// (the default) picks text when out is a character device (an interactive
+// TTY) and tap NDJSON otherwise, so piped or redirected output is
+// machine-readable while a human at a terminal still gets the bordered
+// text view.
+func resolveLintFormat(format string, out *os.File) (string, error) {
+	switch format {
+	case "text", "json", "ndjson":
+		return format, nil
+	case "auto", "":
+		if isTerminal(out) {
+			return "text", nil
+		}
+		return "ndjson", nil
+	default:
+		return "", fmt.Errorf("--format must be auto, text, json, or ndjson, got %q", format)
+	}
+}
+
+// isTerminal reports whether f is an interactive character device.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func whyMain(ctx context.Context, args []string) int {

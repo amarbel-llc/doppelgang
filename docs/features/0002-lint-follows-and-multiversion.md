@@ -46,44 +46,62 @@ which inputs pinned them, and hand-write the `follows` lines to collapse them.
    one revision* and surface them. Picking a winning revision is a judgment
    call, so these are highlighted, not auto-fixed.
 
-It additionally reuses the existing `dupes` version-drift pass over the
-realized closure so a single `lint` run shows both the lockfile-level and the
-closure-level views of the same underlying problem.
+`lint` is a pure offline lockfile analysis. (The closure-level version-drift
+view of the same underlying problem lives in `dupes`; an earlier revision of
+this command appended it, but it was dropped so `lint` needs neither a built
+installable nor `nix` on `PATH`.)
 
 ## Interface
 
 ```
-doppelgang lint [--flake .] [--installable ./result] [--scope runtime|build]
-                [--no-closure] [--json]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson]
 ```
 
 - `--flake` (default `.`) — directory containing `flake.lock`. Read offline;
-  no `nix` invocation for the follows / multi-version analyses.
-- `--installable` (default `./result`), `--scope` (default `runtime`) — the
-  installable whose realized closure feeds the reused version-drift pass.
-- `--no-closure` — skip the closure pass entirely (pure offline lockfile lint).
-- `--json` — emit structured JSON instead of text.
+  no `nix` invocation.
+- `--format` (default `auto`) — output format. `text` is the bordered
+  human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON
+  schema; `json` is a single indented JSON document. `auto` emits `text` when
+  stdout is a TTY and `ndjson` otherwise, so piped/redirected output is
+  machine-readable without a flag.
 
-### Output sections
+### Output sections (`--format text`)
 
 - `── follows opportunities ──` — one block per identical-source group:
   a header naming the shared source and how many times it is pinned, followed
   by the concrete `follows` line(s) to add.
 - `── multi-version inputs ──` — one line per `owner/repo` pinned at multiple
   revs, listing each short rev and a sample attr-path that reaches it.
-- `── Version drift ──` — the existing `dupes` closure section, appended
-  verbatim unless `--no-closure` (or the installable can't be resolved).
 
 Each section prints a positive "nothing found" line when empty so the reader
 knows the pass ran.
 
-### Best-effort closure pass
+### NDJSON mapping (`--format ndjson`)
 
-A lint run must stay useful in an unbuilt checkout. If the installable cannot
-be resolved (no `./result`, `nix` absent, eval failure), the closure pass is
-skipped with a one-line stderr warning and the command still exits `0` with
-its lockfile findings. A missing `flake.lock`, by contrast, is a hard error
-(exit `1`) — that is the input the command exists to analyze.
+The two checks map onto the tap test-result schema as two top-level `test`
+records — `"follows opportunities"` and `"multi-version inputs"` — each `ok`
+when its check found nothing. Every finding becomes a nested subtest carrying
+a structured `diagnostic` object (the follows group's identity / canonical /
+node-count / lines, or the multi-version source / revs). A leading `plan`
+record announces the two checks up front, and a trailing `summary` record
+reports the check pass/fail counts (`total` = `plan_count` = 2); subtests do
+not count toward the summary, per the schema. The document is always
+`valid: true` and `bailed: false`: `lint` generates records rather than
+transforming a TAP stream, so there are no parse diagnostics.
+
+The `plan` record is a deliberate extension beyond tap RFC 0001 (which defines
+only `test`/`bailout`/`summary` and forbids other record types). `lint` emits
+`{"type":"plan","count":2}` as the first line, treating its fixed two checks as
+a `1..2` plan; this is tracked upstream by amarbel-llc/tap#30, and `lint` will
+reconcile the record shape with whatever that issue formalizes. Because the
+schema's compatibility rules require consumers to ignore unrecognized record
+types, the extension is backward-safe for existing consumers.
+
+### Offline; no closure pass
+
+A missing `flake.lock` is a hard error (exit `1`) — that is the input the
+command exists to analyze. There is no closure pass, so a lint run is useful
+in an unbuilt checkout with no `nix` available.
 
 ## Examples
 
@@ -126,9 +144,10 @@ deeper, transitively-pinned copy is the one redirected.
   sources are excluded — their urls embed the rev, so equal urls are an
   identity match and unequal urls aren't comparable without fragile parsing).
   A group spanning >1 rev is flagged.
-- **Closure reuse**: `lintMain` calls `closure.Load` → `dupes.InvertReferences`
-  → `dupes.FindVersionDrift(g, parents, nil)` and renders it via the existing
-  `render.writeDrift`.
+- **Rendering** (`internal/bravo/render`): `LintText` / `LintJSON` /
+  `LintNDJSON` consume the `lint.Report`. `lintMain` picks one via `--format`
+  (defaulting to `text` on a TTY, `ndjson` otherwise). The NDJSON renderer
+  maps the report onto the amarbel-llc/tap test-result schema (RFC 0001).
 
 ## Limitations
 
@@ -144,8 +163,6 @@ deeper, transitively-pinned copy is the one redirected.
   target. This is valid Nix follows syntax but assumes the user is willing to
   anchor on that transitive input.
 - **url-type inputs are excluded from multi-version.** See above.
-- **Closure pass needs `nix` and a built installable.** Without them the
-  version-drift section is skipped (by design).
 
 ## Relationship to `dupes` / version-drift (FDR-0001, issue #3)
 
@@ -153,17 +170,18 @@ deeper, transitively-pinned copy is the one redirected.
 (store paths). `lint`'s follows / multi-version analyses operate on
 *flake.lock* (input pins). They are complementary lenses on the same problem:
 the lock is where duplication is *introduced* and *fixed*; the closure is
-where its *cost* is paid. `lint` reuses `dupes.FindVersionDrift` rather than
-reimplementing closure analysis, and deliberately stays out of the cache /
-cost-class / publisher-attribution surface that FDR-0001 specifies for
-`dupes` (and which issue #1 gates).
+where its *cost* is paid. The closure-level version-drift view is exclusive to
+`dupes` — `lint` deliberately stays offline and lockfile-only, and stays out of
+the cache / cost-class / publisher-attribution surface that FDR-0001 specifies
+for `dupes` (and which issue #1 gates).
 
 ## More Information
 
 - Issue #4 (this feature request).
-- Existing implementation reused: `internal/0/closure/load.go`,
-  `internal/alfa/dupes/dupes.go` (`InvertReferences`, `FindVersionDrift`),
-  `internal/bravo/render` (`writeDrift`, `human`, `truncList`).
+- Existing implementation reused: `internal/0/flakelock` (lockfile parser),
+  `internal/bravo/render` (`shortRev`, `truncList`).
+- NDJSON output conforms to the amarbel-llc/tap test-result schema
+  (`docs/rfcs/0001-test-result-ndjson-schema.md` in that repo).
 - Live fixture: this repo's `flake.lock` carries three duplicate-source node
   pairs (`nixpkgs-master`, `systems`, `treefmt-nix`) exercised by the lint
   package tests.

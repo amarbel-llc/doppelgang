@@ -10,8 +10,7 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
                  [--top N] [--by-owner] [--json]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
-doppelgang lint [--flake .] [--installable ./result] [--scope runtime|build]
-                [--no-closure] [--json]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson]
 doppelgang version
 ```
 
@@ -44,16 +43,25 @@ so build-time-only paths like setup hooks (`install-shell-files`,
   revision. These are highlighted but never auto-collapsed, since choosing a
   revision changes behavior.
 
-The flake.lock analysis is offline (no `nix` invocation). Unless `--no-closure`
-is passed, `lint` also runs the `dupes` version-drift pass over the realized
-closure (`--installable`/`--scope`) and appends its section; if the installable
-can't be resolved (e.g. no `./result`), that pass is skipped with a warning and
-`lint` still reports the flake.lock findings. A missing `flake.lock` is a hard
-error. See `docs/features/0002-lint-follows-and-multiversion.md`.
+The analysis is entirely offline (no `nix` invocation); it reads only
+`<flake>/flake.lock`. A missing `flake.lock` is a hard error. See
+`docs/features/0002-lint-follows-and-multiversion.md`.
+
+`--format` (default `auto`) selects the output: `text` is the bordered
+human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON schema
+(one JSON record per line — a leading `plan` record, the two checks as
+top-level test points each with their findings as nested subtests, and a
+trailing `summary` record); `json` is a single indented JSON document. `auto`
+emits `text` when stdout is a TTY and `ndjson` otherwise, so piping or
+redirecting `lint` yields machine-readable output without a flag.
+
+The leading `{"type":"plan","count":2}` record is a deliberate extension beyond
+tap RFC 0001 (which defines only `test`/`bailout`/`summary`); it is tracked
+upstream by amarbel-llc/tap#30 and lint will track whatever shape that issue
+settles on.
 
 `lint` exits `1` when any follows or multi-version finding is reported, so it
-can run in CI as a gate against new input duplication. The closure version-drift
-section is observational and does not affect the exit code.
+can run in CI as a gate against new input duplication.
 
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.

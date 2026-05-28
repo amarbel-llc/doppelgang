@@ -26,13 +26,13 @@ lint: lint-nix
 lint-nix: build-nix
   ./result/bin/doppelgang lint
 
-# Run `doppelgang lint --flake <DIR> --no-closure` against an arbitrary
-# flake directory. Used for ad-hoc validation of lint output against
-# external fixtures (e.g. /tmp/claude-madder-* snapshots during the
-# FDR-0002 promotion checks). Exits 1 on findings.
+# Run `doppelgang lint --flake <DIR>` against an arbitrary flake
+# directory. Used for ad-hoc validation of lint output against external
+# fixtures (e.g. /tmp/claude-madder-* snapshots during the FDR-0002
+# promotion checks). Exits 1 on findings.
 [group('explore')]
 explore-lint-flake DIR: build-nix
-  ./result/bin/doppelgang lint --flake {{DIR}} --no-closure
+  ./result/bin/doppelgang lint --flake {{DIR}}
 
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.
