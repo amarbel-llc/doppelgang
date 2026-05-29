@@ -2,7 +2,7 @@
   description = "doppelgang: find duplicate packages in a Nix closure, sorted by wasted bytes";
 
   inputs = {
-    nixpkgs.url = "github:amarbel-llc/nixpkgs";
+    nixpkgs.url = "github:amarbel-llc/igloo";
     nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master";
     nixpkgs.inputs.treefmt-nix.follows = "treefmt-nix";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
