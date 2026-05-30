@@ -2,20 +2,20 @@
   description = "doppelgang: find duplicate packages in a Nix closure, sorted by wasted bytes";
 
   inputs = {
-    nixpkgs.url = "github:amarbel-llc/igloo";
-    nixpkgs.inputs.nixpkgs-master.follows = "nixpkgs-master";
-    nixpkgs.inputs.treefmt-nix.follows = "treefmt-nix";
+    igloo.url = "github:amarbel-llc/igloo";
+    igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
+    igloo.inputs.treefmt-nix.follows = "treefmt-nix";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
-    utils.inputs.systems.follows = "nixpkgs/systems";
+    utils.inputs.systems.follows = "igloo/systems";
     treefmt-nix.url = "github:numtide/treefmt-nix";
-    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    treefmt-nix.inputs.nixpkgs.follows = "igloo";
   };
 
   outputs =
     {
       self,
-      nixpkgs,
+      igloo,
       nixpkgs-master,
       utils,
       treefmt-nix,
@@ -23,7 +23,7 @@
     utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import igloo { inherit system; };
         pkgs-master = import nixpkgs-master { inherit system; };
 
         go = pkgs.go_1_26;
