@@ -52,7 +52,7 @@
         # `version` and `commit` and auto-injects them as -X main.version /
         # -X main.commit ldflags, so `doppelgang version` reports both at
         # runtime.
-        doppelgangVersion = "0.0.6";
+        doppelgangVersion = "0.1.0";
         # shortRev for clean builds, dirtyShortRev for dirty trees so devshell
         # builds visibly read `dirty-abcdef` instead of impersonating a release.
         doppelgangCommit = self.shortRev or self.dirtyShortRev or "unknown";
