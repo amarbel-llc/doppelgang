@@ -34,6 +34,14 @@ lint-nix: build-nix
 explore-lint-flake DIR: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}}
 
+# Run `doppelgang lint --fix --flake <DIR>` against an arbitrary flake
+# directory: apply the follows-opportunity edits to its flake.nix and
+# re-lock. Used to validate the --fix repair path end-to-end against a
+# fixture flake with a known duplicate.
+[group('explore')]
+explore-lint-fix DIR: build-nix
+  ./result/bin/doppelgang lint --fix --flake {{DIR}}
+
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.
 fmt *ARGS:

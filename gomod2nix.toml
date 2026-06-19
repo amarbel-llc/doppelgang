@@ -1,3 +1,7 @@
 schema = 3
 
 [mod]
+  [mod.'github.com/clarete/langlang/go']
+    version = 'v0.0.12'
+    hash = 'sha256-qUiwItAHjL89cSZ6gi+uo28FjPojin7pdg0IKtTuDI8='
+    goVersion = '1.21'

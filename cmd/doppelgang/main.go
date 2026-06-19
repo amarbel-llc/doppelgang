@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/friedenberg/doppelgang/internal/0/closure"
 	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"github.com/friedenberg/doppelgang/internal/0/nixedit"
 	"github.com/friedenberg/doppelgang/internal/0/storepath"
 	"github.com/friedenberg/doppelgang/internal/alfa/attribute"
 	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
@@ -61,13 +63,16 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--fix]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
 	fmt.Fprintf(os.Stderr, "inputs and flags inputs pinned at multiple revs. Exits 1 when any follows or\n")
 	fmt.Fprintf(os.Stderr, "multi-version finding is reported, so it can serve as a CI gate. --format=auto\n")
 	fmt.Fprintf(os.Stderr, "(the default) emits text on a TTY and tap NDJSON (amarbel-llc/tap) otherwise.\n")
+	fmt.Fprintf(os.Stderr, "--fix applies the follows-opportunity edits to <flake>/flake.nix, re-locks via\n")
+	fmt.Fprintf(os.Stderr, "`nix flake lock`, and stages the touched files (needs nix on PATH).\n")
+	fmt.Fprintf(os.Stderr, "Multi-version inputs stay report-only — collapsing them changes behavior.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -131,6 +136,7 @@ func lintMain(args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ExitOnError)
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
 	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
+	fix := fs.Bool("fix", false, "apply follows-opportunity edits to flake.nix and re-lock (needs nix on PATH)")
 	_ = fs.Parse(args)
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
@@ -159,12 +165,117 @@ func lintMain(args []string) int {
 		return errExit(renderErr)
 	}
 
+	if *fix {
+		return lintFix(*flakeDir, sum.Report)
+	}
+
 	// Exit non-zero when actionable findings exist so `lint` can serve
 	// as a CI gate.
 	if len(sum.Report.Follows) > 0 || len(sum.Report.MultiVersion) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// lintFix applies the follows-opportunity edits from report to
+// <flakeDir>/flake.nix, re-locks via `nix flake lock`, stages the
+// touched files, and re-analyzes the regenerated lock to compute an
+// honest exit code. It is invoked only under --fix, after the report has
+// already been rendered.
+//
+// Multi-version findings are never auto-collapsed (choosing a revision
+// changes behavior), so they are reported only and keep the exit code
+// non-zero. The exit code is 0 only when, after the fix, neither follows
+// nor multi-version findings remain.
+//
+// All progress goes to stderr so it does not pollute the machine-readable
+// report already written to stdout.
+func lintFix(flakeDir string, report lint.Report) int {
+	var lines []string
+	for _, r := range report.Follows {
+		lines = append(lines, r.Lines...)
+	}
+
+	if len(lines) == 0 {
+		if len(report.MultiVersion) > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: no follows opportunities to apply; %d multi-version input(s) remain (report-only, not auto-collapsed)\n", len(report.MultiVersion))
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing to fix\n")
+		return 0
+	}
+
+	nixPath := filepath.Join(flakeDir, "flake.nix")
+	src, err := os.ReadFile(nixPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: read %s: %v\n", nixPath, err)
+		return 1
+	}
+
+	out, applied, err := nixedit.Apply(src, lines)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not edit %s automatically (%v).\n"+
+			"Apply the follows line(s) above by hand, then re-run `nix flake lock`.\n", nixPath, err)
+		return 1
+	}
+
+	if len(applied) == 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: follows already present in flake.nix; nothing to apply\n")
+	} else {
+		if err := os.WriteFile(nixPath, out, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: write %s: %v\n", nixPath, err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: applied %d follows line(s) to %s:\n", len(applied), nixPath)
+		for _, l := range applied {
+			fmt.Fprintf(os.Stderr, "    %s\n", l)
+		}
+		if err := relock(flakeDir); err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-lock failed: %v\n", err)
+			return 1
+		}
+		stageFixedFiles(flakeDir)
+	}
+
+	// Re-analyze the (possibly regenerated) lock for an honest exit code.
+	lock, err := flakelock.Load(flakeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: reload flake.lock: %v\n", err)
+		return 1
+	}
+	after := lint.Analyze(lock)
+	if len(after.Follows) > 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d follows opportunity group(s) remain after fix (re-run lint for detail)\n", len(after.Follows))
+		return 1
+	}
+	if len(after.MultiVersion) > 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d multi-version input(s) remain (report-only, not auto-collapsed)\n", len(after.MultiVersion))
+		return 1
+	}
+	return 0
+}
+
+// relock regenerates <flakeDir>/flake.lock via `nix flake lock` so the
+// lock reflects the newly added follows. Output is inherited so nix's own
+// diagnostics reach the user.
+func relock(flakeDir string) error {
+	cmd := exec.Command("nix", "flake", "lock", flakeDir)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// stageFixedFiles runs `git add flake.nix flake.lock` in flakeDir so the
+// repair self-stages, composing with a `nix fmt` / pre-commit --staged
+// repair flow (per the conformist/dewey repair convention). A failure
+// here (e.g. not a git repo) is non-fatal: the edits are already written.
+func stageFixedFiles(flakeDir string) {
+	cmd := exec.Command("git", "-C", flakeDir, "add", "flake.nix", "flake.lock")
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not stage flake.nix/flake.lock (%v); stage them yourself\n", err)
+	}
 }
 
 // resolveLintFormat maps the --format value to a concrete renderer. "auto"

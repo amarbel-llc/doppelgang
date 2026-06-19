@@ -10,7 +10,7 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
                  [--top N] [--by-owner] [--json]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
-doppelgang lint [--flake .] [--format auto|text|json|ndjson]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--fix]
 doppelgang version
 ```
 
@@ -46,6 +46,22 @@ so build-time-only paths like setup hooks (`install-shell-files`,
 The analysis is entirely offline (no `nix` invocation); it reads only
 `<flake>/flake.lock`. A missing `flake.lock` is a hard error. See
 `docs/features/0002-lint-follows-and-multiversion.md`.
+
+`--fix` promotes the follows opportunities from "print" to "apply": it edits
+`<flake>/flake.nix` to add the `follows` line(s) `lint` computed, re-locks via
+`nix flake lock`, and `git add`s the touched files (self-staging, so it
+composes with a `nix fmt` / pre-commit `--staged` repair flow). The edit is
+real Nix-expression surgery — `flake.nix` is parsed with an embedded PEG
+(amarbel-llc/langlang) and the `follows` bindings are spliced into the
+top-level `inputs` attrset by byte offset, preserving the rest of the file.
+`--fix` is idempotent (re-running on an already-collapsed flake is a no-op) and
+needs `nix` on `PATH`, so unlike plain `lint` it is not offline. **Multi-version
+inputs stay report-only** — collapsing them means choosing a revision, which
+changes behavior — so `--fix` fixes only the byte-identical follows
+opportunities and still exits non-zero if any multi-version finding (or any
+residual follows opportunity) remains afterward. If `flake.nix` can't be parsed
+or has no editable `inputs` attrset, `--fix` prints the lines to apply by hand
+and exits non-zero rather than risk corrupting the file.
 
 `--format` (default `auto`) selects the output: `text` is the bordered
 human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON schema
