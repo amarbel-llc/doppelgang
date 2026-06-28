@@ -37,6 +37,18 @@ const maxFlakeNix = 1 << 20 // 1 MiB
 // fetchable source are skipped, which keeps the common heavy inputs (nixpkgs,
 // usually a leaf in the lock) from being fetched.
 func transitiveDeadOverrides(ctx context.Context, lock *flakelock.Lock) []lint.DeadOverride {
+	return transitiveDeadOverridesWith(lock, func(lk *flakelock.Locked) ([]byte, bool) {
+		return fetchFlakeNix(ctx, lk)
+	})
+}
+
+// transitiveDeadOverridesWith is the fetch-injected core of
+// transitiveDeadOverrides: it walks the lock, calls fetch for each candidate
+// upstream node, and resolves the recovered overrides. fetch returns the
+// node's flake.nix bytes and whether the fetch succeeded; a false skips the
+// node. Separated out so tests can exercise the full extract→resolve→label
+// pipeline with a stub fetcher (no network or nix).
+func transitiveDeadOverridesWith(lock *flakelock.Lock, fetch func(*flakelock.Locked) ([]byte, bool)) []lint.DeadOverride {
 	var out []lint.DeadOverride
 	for _, key := range sortedNodeKeys(lock) {
 		if key == lock.Root {
@@ -46,7 +58,7 @@ func transitiveDeadOverrides(ctx context.Context, lock *flakelock.Lock) []lint.D
 		if node.Locked == nil || len(node.Inputs) == 0 {
 			continue
 		}
-		src, ok := fetchFlakeNix(ctx, node.Locked)
+		src, ok := fetch(node.Locked)
 		if !ok {
 			continue
 		}
@@ -97,10 +109,14 @@ func fetchFlakeNix(ctx context.Context, lk *flakelock.Locked) ([]byte, bool) {
 	return nixFetchFlakeNix(ctx, lk)
 }
 
+// githubRawBaseURL is the base for raw github flake.nix fetches. It is a var
+// (not a const) only so tests can point it at a local httptest server.
+var githubRawBaseURL = "https://raw.githubusercontent.com"
+
 // githubRawFlakeNix fetches flake.nix from raw.githubusercontent.com at the
 // pinned rev. Best-effort: any non-200 or transport error yields ok=false.
 func githubRawFlakeNix(ctx context.Context, owner, repo, rev string) ([]byte, bool) {
-	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/flake.nix", owner, repo, rev)
+	url := fmt.Sprintf("%s/%s/%s/%s/flake.nix", githubRawBaseURL, owner, repo, rev)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, false
