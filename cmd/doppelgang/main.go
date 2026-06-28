@@ -63,7 +63,7 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--fix]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--online] [--fix]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
@@ -71,10 +71,12 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "flags dead `follows` overrides that target an input the dependency no longer\n")
 	fmt.Fprintf(os.Stderr, "declares. Exits 1 when any finding is reported, so it can serve as a CI gate.\n")
 	fmt.Fprintf(os.Stderr, "--format=auto (the default) emits text on a TTY and tap NDJSON otherwise.\n")
-	fmt.Fprintf(os.Stderr, "--fix splices the follows-opportunity edits into <flake>/flake.nix and prunes\n")
-	fmt.Fprintf(os.Stderr, "direct dead overrides, then re-locks via `nix flake lock` and stages the touched\n")
-	fmt.Fprintf(os.Stderr, "files (needs nix on PATH). Multi-version inputs and transitive dead overrides\n")
-	fmt.Fprintf(os.Stderr, "stay report-only — collapsing/relocating them is not a local mechanical edit.\n")
+	fmt.Fprintf(os.Stderr, "--online additionally detects transitive dead overrides (declared in an upstream\n")
+	fmt.Fprintf(os.Stderr, "flake.nix) by fetching those files — read-only and best-effort. --fix splices the\n")
+	fmt.Fprintf(os.Stderr, "follows-opportunity edits into <flake>/flake.nix and prunes direct dead overrides,\n")
+	fmt.Fprintf(os.Stderr, "then re-locks via `nix flake lock` and stages the touched files (needs nix on PATH;\n")
+	fmt.Fprintf(os.Stderr, "implies --online). Multi-version inputs and transitive dead overrides stay\n")
+	fmt.Fprintf(os.Stderr, "report-only — collapsing/relocating them is not a local mechanical edit.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -139,6 +141,7 @@ func lintMain(ctx context.Context, args []string) int {
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
 	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
 	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
+	online := fs.Bool("online", false, "additionally detect transitive dead overrides by fetching upstream flake.nix files (read-only, best-effort; implied by --fix)")
 	_ = fs.Parse(args)
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
@@ -147,9 +150,10 @@ func lintMain(ctx context.Context, args []string) int {
 		return 2
 	}
 
-	// The impure --fix run additionally attempts best-effort online detection
-	// of transitive dead overrides (those declared in an upstream flake.nix).
-	report, err := analyzeFlake(ctx, *flakeDir, *fix)
+	// Transitive dead-override detection fetches upstream flake.nix files, so
+	// it runs only when explicitly opted in: --online (read-only) or --fix
+	// (which is already impure). Plain `lint` stays offline.
+	report, err := analyzeFlake(ctx, *flakeDir, *fix || *online)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1

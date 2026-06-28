@@ -43,6 +43,14 @@ lint-nix: build-nix
 explore-lint-flake DIR: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}}
 
+# Run `doppelgang lint --online --flake <DIR>` (text output): read-only
+# transitive dead-override detection, which fetches upstream flake.nix files
+# over the network. DIR defaults to this repo. Used to validate transitive
+# detection against real closures (e.g. issue #11's conformist/moxy/posh).
+[group('explore')]
+explore-lint-online DIR=".": build-nix
+  ./result/bin/doppelgang lint --online --format text --flake {{DIR}}
+
 # Run `doppelgang lint --fix --flake <DIR>` against an arbitrary flake
 # directory: apply the follows-opportunity edits to its flake.nix and
 # re-lock. Used to validate the --fix repair path end-to-end against a

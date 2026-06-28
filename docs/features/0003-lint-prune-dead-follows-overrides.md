@@ -95,16 +95,24 @@ otherwise. They remain report-only either way (the fix lands upstream).
 ## Interface
 
 ```
-doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--fix]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--online] [--fix]
 ```
 
-No new flags. The feature adds a third finding category and extends `--fix`:
+The feature adds a third finding category, one new flag (`--online`), and
+extends `--fix`:
 
 - **New finding category: dead follows overrides.** Surfaced alongside
   *follows opportunities* and *multi-version inputs* in all three formats. Each
   finding names the offending `inputs.<dep>…inputs.<x>.follows` binding, the
   node `<x>` was supposed to attach to, and whether it is direct (fixable here)
   or transitive (report-only).
+- **`--online` enables read-only transitive detection.** Transitive detection
+  fetches upstream `flake.nix` files, so it is opt-in: `--online` runs it
+  read-only (report a transitive finding without editing anything), and `--fix`
+  implies it (that run is already impure). Plain `lint` stays offline and
+  reports only direct findings. This split exists because transitive overrides
+  are report-only — a user often wants to *see* them without a mutating
+  `--fix`.
 - **`--fix` prunes direct dead overrides.** For dead overrides that live in the
   linted `flake.nix`, `--fix` deletes the offending binding via `nixedit` PEG
   surgery, re-locks (`nix flake lock`), and self-stages `flake.nix` / `flake.lock`

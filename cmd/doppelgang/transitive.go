@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -37,9 +38,25 @@ const maxFlakeNix = 1 << 20 // 1 MiB
 // fetchable source are skipped, which keeps the common heavy inputs (nixpkgs,
 // usually a leaf in the lock) from being fetched.
 func transitiveDeadOverrides(ctx context.Context, lock *flakelock.Lock) []lint.DeadOverride {
-	return transitiveDeadOverridesWith(lock, func(lk *flakelock.Locked) ([]byte, bool) {
+	out, stats := transitiveDeadOverridesWith(lock, func(lk *flakelock.Locked) ([]byte, bool) {
 		return fetchFlakeNix(ctx, lk)
 	})
+	// Summarize the scan on stderr so a clean result is distinguishable from
+	// "every fetch silently failed" — important because the per-node fetch is
+	// best-effort and swallows errors. Only printed when there were candidates.
+	if stats.considered > 0 {
+		fmt.Fprintf(os.Stderr,
+			"doppelgang lint: transitive scan: fetched %d/%d upstream flake.nix (%d unreachable), %d dead override(s)\n",
+			stats.fetched, stats.considered, stats.considered-stats.fetched, len(out))
+	}
+	return out
+}
+
+// transitiveScanStats records how many upstream nodes were candidates and how
+// many were successfully fetched, so the caller can report scan coverage.
+type transitiveScanStats struct {
+	considered int // non-root nodes with a source and inputs
+	fetched    int // of those, successfully fetched
 }
 
 // transitiveDeadOverridesWith is the fetch-injected core of
@@ -48,8 +65,9 @@ func transitiveDeadOverrides(ctx context.Context, lock *flakelock.Lock) []lint.D
 // node's flake.nix bytes and whether the fetch succeeded; a false skips the
 // node. Separated out so tests can exercise the full extract→resolve→label
 // pipeline with a stub fetcher (no network or nix).
-func transitiveDeadOverridesWith(lock *flakelock.Lock, fetch func(*flakelock.Locked) ([]byte, bool)) []lint.DeadOverride {
+func transitiveDeadOverridesWith(lock *flakelock.Lock, fetch func(*flakelock.Locked) ([]byte, bool)) ([]lint.DeadOverride, transitiveScanStats) {
 	var out []lint.DeadOverride
+	var stats transitiveScanStats
 	for _, key := range sortedNodeKeys(lock) {
 		if key == lock.Root {
 			continue
@@ -58,10 +76,12 @@ func transitiveDeadOverridesWith(lock *flakelock.Lock, fetch func(*flakelock.Loc
 		if node.Locked == nil || len(node.Inputs) == 0 {
 			continue
 		}
+		stats.considered++
 		src, ok := fetch(node.Locked)
 		if !ok {
 			continue
 		}
+		stats.fetched++
 		overrides, err := nixedit.Overrides(src)
 		if err != nil {
 			continue
@@ -74,7 +94,7 @@ func transitiveDeadOverridesWith(lock *flakelock.Lock, fetch func(*flakelock.Loc
 		}
 		return out[i].Override < out[j].Override
 	})
-	return out
+	return out, stats
 }
 
 func sortedNodeKeys(lock *flakelock.Lock) []string {

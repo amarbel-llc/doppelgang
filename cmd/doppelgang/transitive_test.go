@@ -64,9 +64,14 @@ func TestTransitiveDeadOverridesPipeline(t *testing.T) {
 		return nil, false // bats serves nothing; igloo is a leaf and never reaches here
 	}
 
-	got := transitiveDeadOverridesWith(lock, fetch)
+	got, stats := transitiveDeadOverridesWith(lock, fetch)
 	if len(got) != 1 {
 		t.Fatalf("want 1 transitive dead override, got %d: %+v", len(got), got)
+	}
+	// tacky and bats both have inputs (candidates); igloo is a leaf. Only
+	// tacky's fetch succeeds.
+	if stats.considered != 2 || stats.fetched != 1 {
+		t.Errorf("stats = %+v, want considered=2 fetched=1", stats)
 	}
 	d := got[0]
 	if d.Override != `inputs.bats.inputs.nixpkgs.follows` {

@@ -10,7 +10,7 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
                  [--top N] [--by-owner] [--json]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
-doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--fix]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--online] [--fix]
 doppelgang version
 ```
 
@@ -64,10 +64,11 @@ touched files (self-staging, so it composes with a `nix fmt` / pre-commit
 is parsed with an embedded PEG (amarbel-llc/langlang); follows bindings are
 spliced into, and dead overrides excised from, the top-level `inputs` attrset
 by byte offset, preserving the rest of the file. `--fix` is idempotent and
-needs `nix` on `PATH`, so unlike plain `lint` it is not offline. Under `--fix`
-it also makes a best-effort online attempt to detect *transitive* dead
-overrides by fetching upstream `flake.nix` files (github raw HTTP, falling back
-to `nix`); any fetch failure is a silent no-op. **Multi-version inputs and
+needs `nix` on `PATH`, so unlike plain `lint` it is not offline. Detecting
+*transitive* dead overrides (declared in an upstream `flake.nix`) requires
+fetching those files, so it is opt-in: `--online` does it read-only, and
+`--fix` implies it. The fetch is best-effort (github raw HTTP, falling back to
+`nix`); any failure is a silent no-op. **Multi-version inputs and
 transitive dead overrides stay report-only** — collapsing or relocating them is
 not a local mechanical edit — so `--fix` still exits non-zero if any such
 finding (or any residual auto-fixable one) remains afterward. If `flake.nix`
