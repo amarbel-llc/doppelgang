@@ -19,6 +19,12 @@ promotion-criteria: |
 
 # `lint` — pruning dead follows overrides
 
+> Implementation note: landed concurrently with this FDR (per the repo's
+> convention of shipping in `exploring`). The direct path (offline detection +
+> `--fix` pruning) and the best-effort online transitive path are both
+> implemented; the heuristics and the fetch strategy are still open to revision,
+> which is what `exploring` reflects.
+
 ## Problem Statement
 
 A `follows` override that points at an input the dependency has since renamed
@@ -200,13 +206,18 @@ all requires the online transitive path; offline, this finding does not appear.)
 - **`lintFix` (`cmd/doppelgang`).** After the existing follows-splice pass, run
   the dead-override deletion pass on the same `flake.nix`, then the single
   re-lock + self-stage already in place. Re-analyze for the honest exit code.
-- **Transitive (online, best-effort).** Recover an upstream override line by
-  fetching that flake's `flake.nix` (its rev is in the lock, so it is
-  addressable). This is the only part needing network. It is report-only and
-  best-effort: attempt the fetch on an impure run, and on *any* failure
-  (unreachable, offline, fetch error) regress to a silent no-op rather than
-  erroring — the run proceeds exactly as if no transitive finding existed. Not
-  deferred; the graceful-degradation contract is what keeps it cheap to ship.
+- **Transitive (online, best-effort).** For each non-root lock node that has
+  inputs (leaves like `nixpkgs` are skipped, which avoids fetching the heavy
+  ones), fetch that flake's `flake.nix`, extract its overrides with `Overrides`,
+  and resolve them from that node via `lint.TransitiveDeadOverrides`. The fetch
+  tries a fast **github raw HTTP** GET (`raw.githubusercontent.com/<owner>/<repo>/<rev>/flake.nix`)
+  first and falls back to a general **`nix eval` + `builtins.fetchTree`** read
+  for non-github source types or when the HTTP fetch fails. It runs only on the
+  impure path (gated on `--fix`), is report-only, and is strictly best-effort:
+  on *any* failure (unreachable, offline, fetch/parse error, unknown source
+  type) it regresses to a silent no-op — the run proceeds exactly as if no
+  transitive finding existed. The github-first design keeps the common case a
+  single ~KB HTTP GET rather than a store realization.
 
 ## Limitations
 

@@ -145,6 +145,55 @@ func TestDeadOverridesFlagsOnlyDeadOnes(t *testing.T) {
 	}
 }
 
+// transitiveLock models root → tacky → bats, where bats declares only
+// `igloo`. tacky's own flake.nix overrides bats's nixpkgs/utils/igloo inputs;
+// the first two are dead (bats has no nixpkgs/utils), igloo is live.
+const transitiveLock = `{
+  "nodes": {
+    "root": { "inputs": { "tacky": "tacky" } },
+    "tacky": {
+      "inputs": { "bats": "bats" },
+      "locked": { "type": "github", "owner": "amarbel-llc", "repo": "tacky", "rev": "ttt", "narHash": "sha-t" }
+    },
+    "bats": {
+      "inputs": { "igloo": "igloo" },
+      "locked": { "type": "github", "owner": "amarbel-llc", "repo": "bats", "rev": "bbb", "narHash": "sha-b" }
+    },
+    "igloo": { "locked": { "type": "github", "owner": "amarbel-llc", "repo": "igloo", "rev": "iii", "narHash": "sha-i" } }
+  },
+  "root": "root",
+  "version": 7
+}`
+
+func TestTransitiveDeadOverrides(t *testing.T) {
+	l, err := flakelock.Parse([]byte(transitiveLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := TransitiveDeadOverrides(l, "tacky", []string{
+		`inputs.bats.inputs.nixpkgs.follows`, // dead: bats has no nixpkgs
+		`inputs.bats.inputs.utils.follows`,   // dead: bats has no utils
+		`inputs.bats.inputs.igloo.follows`,   // live: bats declares igloo
+	}, "amarbel-llc/tacky")
+	if len(got) != 2 {
+		t.Fatalf("want 2 transitive dead overrides, got %d: %+v", len(got), got)
+	}
+	for _, d := range got {
+		if d.Direct {
+			t.Errorf("transitive override must have Direct=false: %+v", d)
+		}
+		if d.Via != "amarbel-llc/tacky" {
+			t.Errorf("Via = %q, want amarbel-llc/tacky", d.Via)
+		}
+		if d.Target != "bats" {
+			t.Errorf("Target = %q, want bats", d.Target)
+		}
+	}
+	if got[0].Input != "nixpkgs" || got[1].Input != "utils" {
+		t.Errorf("inputs = %q,%q want nixpkgs,utils (sorted by Override)", got[0].Input, got[1].Input)
+	}
+}
+
 // multiVersionLock: two distinct revs of NixOS/nixpkgs reachable from root.
 const multiVersionLock = `{
   "nodes": {

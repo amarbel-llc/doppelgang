@@ -46,7 +46,7 @@ func main() {
 	case "why":
 		os.Exit(whyMain(ctx, flag.Args()[1:]))
 	case "lint":
-		os.Exit(lintMain(flag.Args()[1:]))
+		os.Exit(lintMain(ctx, flag.Args()[1:]))
 	case "version":
 		fmt.Printf("doppelgang %s (%s)\n", version, commit)
 		return
@@ -134,11 +134,11 @@ func dupesMain(ctx context.Context, args []string) int {
 	return errExit(render.Text(os.Stdout, sum))
 }
 
-func lintMain(args []string) int {
+func lintMain(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ExitOnError)
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
 	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
-	fix := fs.Bool("fix", false, "apply follows-opportunity edits to flake.nix and re-lock (needs nix on PATH)")
+	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
 	_ = fs.Parse(args)
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
@@ -147,7 +147,9 @@ func lintMain(args []string) int {
 		return 2
 	}
 
-	report, err := analyzeFlake(*flakeDir)
+	// The impure --fix run additionally attempts best-effort online detection
+	// of transitive dead overrides (those declared in an upstream flake.nix).
+	report, err := analyzeFlake(ctx, *flakeDir, *fix)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1
@@ -168,7 +170,7 @@ func lintMain(args []string) int {
 	}
 
 	if *fix {
-		return lintFix(*flakeDir, report)
+		return lintFix(ctx, *flakeDir, report)
 	}
 
 	// Exit non-zero when actionable findings exist so `lint` can serve
@@ -183,15 +185,23 @@ func lintMain(args []string) int {
 // <flakeDir>/flake.nix is present and parseable, the direct dead-override
 // check on top. A missing or unparseable flake.nix degrades dead-override
 // detection to skipped (the lock-only report is returned) rather than failing
-// the run, so `lint` stays useful in an unbuilt checkout. Detection is fully
-// offline; only --fix's re-lock needs nix.
-func analyzeFlake(flakeDir string) (lint.Report, error) {
+// the run, so `lint` stays useful in an unbuilt checkout. Direct detection is
+// fully offline.
+//
+// When online is true (the impure --fix run), it also attempts best-effort
+// detection of transitive dead overrides — those declared in an upstream
+// flake's flake.nix — by fetching those files. Any fetch failure is a silent
+// no-op, so transitive findings are present only when reachable.
+func analyzeFlake(ctx context.Context, flakeDir string, online bool) (lint.Report, error) {
 	lock, err := flakelock.Load(flakeDir)
 	if err != nil {
 		return lint.Report{}, err
 	}
 	report := lint.Analyze(lock)
 	report.DeadOverrides = directDeadOverrides(flakeDir, lock)
+	if online {
+		report.DeadOverrides = append(report.DeadOverrides, transitiveDeadOverrides(ctx, lock)...)
+	}
 	return report, nil
 }
 
@@ -222,13 +232,7 @@ func reportHasFindings(r lint.Report) bool {
 // inputs (collapsing them changes behavior) and transitive dead overrides
 // (the fix lands in an upstream flake.nix, not this one).
 func reportOnlyCount(r lint.Report) int {
-	n := len(r.MultiVersion)
-	for _, d := range r.DeadOverrides {
-		if !d.Direct {
-			n++
-		}
-	}
-	return n
+	return len(r.MultiVersion) + transitiveCount(r)
 }
 
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
@@ -245,7 +249,7 @@ func reportOnlyCount(r lint.Report) int {
 //
 // All progress goes to stderr so it does not pollute the machine-readable
 // report already written to stdout.
-func lintFix(flakeDir string, report lint.Report) int {
+func lintFix(ctx context.Context, flakeDir string, report lint.Report) int {
 	var followsLines []string
 	for _, r := range report.Follows {
 		followsLines = append(followsLines, r.Lines...)
@@ -320,8 +324,10 @@ func lintFix(flakeDir string, report lint.Report) int {
 	}
 
 	// Re-analyze the (possibly regenerated) lock + edited flake.nix for an
-	// honest exit code.
-	after, err := analyzeFlake(flakeDir)
+	// honest exit code. This pass is offline (online=false): pruning a direct
+	// override cannot change the transitive findings, so those are carried
+	// forward from the pre-fix report rather than re-fetched.
+	after, err := analyzeFlake(ctx, flakeDir, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
@@ -331,7 +337,11 @@ func lintFix(flakeDir string, report lint.Report) int {
 		return 1
 	}
 	if n := len(after.DeadOverrides); n > 0 {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d dead override(s) remain after fix (transitive overrides are fixed in the upstream flake.nix, not here)\n", n)
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d direct dead override(s) remain after fix (re-run lint for detail)\n", n)
+		return 1
+	}
+	if n := transitiveCount(report); n > 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d transitive dead override(s) remain (fix in the upstream flake.nix, not here)\n", n)
 		return 1
 	}
 	if len(after.MultiVersion) > 0 {
@@ -339,6 +349,18 @@ func lintFix(flakeDir string, report lint.Report) int {
 		return 1
 	}
 	return 0
+}
+
+// transitiveCount counts the transitive (report-only) dead overrides in a
+// report — those whose fix lands in an upstream flake.nix.
+func transitiveCount(r lint.Report) int {
+	n := 0
+	for _, d := range r.DeadOverrides {
+		if !d.Direct {
+			n++
+		}
+	}
+	return n
 }
 
 // relock regenerates <flakeDir>/flake.lock via `nix flake lock` so the

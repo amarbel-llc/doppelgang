@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,7 +42,7 @@ func TestAnalyzeFlakeDetectsDirectDeadOverride(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(dir)
+	rep, err := analyzeFlake(context.Background(), dir, false)
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestAnalyzeFlakeNoFalsePositive(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(dir)
+	rep, err := analyzeFlake(context.Background(), dir, false)
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}

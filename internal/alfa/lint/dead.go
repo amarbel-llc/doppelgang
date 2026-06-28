@@ -98,14 +98,50 @@ func overrideChain(lhs string) ([]string, bool) {
 	return chain, true
 }
 
-// resolveOverride walks the override's prefix (every chain element but the
-// last) from root via string-form node edges, then reports whether the final
-// element is absent from the reached node's declared inputs (its Inputs keys,
-// which include both node edges and legitimate follows arrays). target is the
-// resolved prefix path. ok is false when the prefix cannot be fully resolved
-// to a node — caller skips those rather than risk a false positive.
+// TransitiveDeadOverrides is the upstream analogue of DeadOverrides: it
+// resolves overrides recovered from an upstream flake's flake.nix (the flake
+// at node startKey) against that node's subtree in the lock, flagging those
+// whose target input the dependency does not declare. Findings are tagged
+// Direct=false and Via=via (the upstream flake, where the fix must land).
+// Like DeadOverrides it is conservative — anything it cannot resolve from
+// startKey is skipped. Output is sorted by Override.
+func TransitiveDeadOverrides(l *flakelock.Lock, startKey string, overrides []string, via string) []DeadOverride {
+	out := make([]DeadOverride, 0)
+	for _, ov := range overrides {
+		chain, ok := overrideChain(ov)
+		if !ok {
+			continue
+		}
+		target, dead, ok := resolveOverrideFrom(l, startKey, chain)
+		if !ok || !dead {
+			continue
+		}
+		out = append(out, DeadOverride{
+			Override: ov,
+			Target:   joinSlash(target),
+			Input:    chain[len(chain)-1],
+			Direct:   false,
+			Via:      via,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Override < out[j].Override })
+	return out
+}
+
+// resolveOverride resolves an override declared in the linted flake.nix,
+// walking from the lock root. See resolveOverrideFrom.
 func resolveOverride(l *flakelock.Lock, chain []string) (target []string, dead, ok bool) {
-	cur := l.Root
+	return resolveOverrideFrom(l, l.Root, chain)
+}
+
+// resolveOverrideFrom walks the override's prefix (every chain element but the
+// last) from startKey via string-form node edges, then reports whether the
+// final element is absent from the reached node's declared inputs (its Inputs
+// keys, which include both node edges and legitimate follows arrays). target
+// is the resolved prefix path. ok is false when the prefix cannot be fully
+// resolved to a node — caller skips those rather than risk a false positive.
+func resolveOverrideFrom(l *flakelock.Lock, startKey string, chain []string) (target []string, dead, ok bool) {
+	cur := startKey
 	prefix := chain[:len(chain)-1]
 	for _, name := range prefix {
 		node, exists := l.Nodes[cur]
