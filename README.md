@@ -34,7 +34,8 @@ In `--scope build` (the default), `--derivation` is passed to `why-depends`
 so build-time-only paths like setup hooks (`install-shell-files`,
 `goBuildHook`) are reachable. `--scope runtime` traces output paths only.
 
-`lint` reads `<flake>/flake.lock` and surfaces reducible input duplication:
+`lint` reads `<flake>/flake.lock` (and `<flake>/flake.nix`) and surfaces three
+classes of reducible input duplication and rot:
 
 - **follows opportunities** — nodes that pin a byte-identical source (same
   `narHash`/`rev`) more than once. For each, `lint` prints the concrete
@@ -42,41 +43,51 @@ so build-time-only paths like setup hooks (`install-shell-files`,
 - **multi-version inputs** — a single `owner/repo` pinned at more than one
   revision. These are highlighted but never auto-collapsed, since choosing a
   revision changes behavior.
+- **dead follows overrides** — `inputs.X.follows` overrides that point at an
+  input the dependency no longer declares (the condition Nix warns on as "has
+  an override for a non-existent input"). A *direct* dead override lives in the
+  linted `flake.nix` and is fixable here; a *transitive* one lives in an
+  upstream flake's `flake.nix` and is report-only (the fix lands upstream).
 
-The analysis is entirely offline (no `nix` invocation); it reads only
-`<flake>/flake.lock`. A missing `flake.lock` is a hard error. See
-`docs/features/0002-lint-follows-and-multiversion.md`.
+The follows / multi-version analyses are entirely offline. Dead-override
+detection reads `<flake>/flake.nix` too (direct overrides are not recorded in
+the lock — Nix drops them), but stays offline; a missing or unparseable
+`flake.nix` simply skips dead-override detection. A missing `flake.lock` is a
+hard error. See `docs/features/0002-lint-follows-and-multiversion.md` and
+`docs/features/0003-lint-prune-dead-follows-overrides.md`.
 
-`--fix` promotes the follows opportunities from "print" to "apply": it edits
-`<flake>/flake.nix` to add the `follows` line(s) `lint` computed, re-locks via
-`nix flake lock`, and `git add`s the touched files (self-staging, so it
-composes with a `nix fmt` / pre-commit `--staged` repair flow). The edit is
-real Nix-expression surgery — `flake.nix` is parsed with an embedded PEG
-(amarbel-llc/langlang) and the `follows` bindings are spliced into the
-top-level `inputs` attrset by byte offset, preserving the rest of the file.
-`--fix` is idempotent (re-running on an already-collapsed flake is a no-op) and
-needs `nix` on `PATH`, so unlike plain `lint` it is not offline. **Multi-version
-inputs stay report-only** — collapsing them means choosing a revision, which
-changes behavior — so `--fix` fixes only the byte-identical follows
-opportunities and still exits non-zero if any multi-version finding (or any
-residual follows opportunity) remains afterward. If `flake.nix` can't be parsed
-or has no editable `inputs` attrset, `--fix` prints the lines to apply by hand
-and exits non-zero rather than risk corrupting the file.
+`--fix` promotes the auto-fixable findings from "print" to "apply": it edits
+`<flake>/flake.nix` to add the follows line(s) `lint` computed *and* to prune
+direct dead overrides, re-locks via `nix flake lock`, and `git add`s the
+touched files (self-staging, so it composes with a `nix fmt` / pre-commit
+`--staged` repair flow). The edit is real Nix-expression surgery — `flake.nix`
+is parsed with an embedded PEG (amarbel-llc/langlang); follows bindings are
+spliced into, and dead overrides excised from, the top-level `inputs` attrset
+by byte offset, preserving the rest of the file. `--fix` is idempotent and
+needs `nix` on `PATH`, so unlike plain `lint` it is not offline. Under `--fix`
+it also makes a best-effort online attempt to detect *transitive* dead
+overrides by fetching upstream `flake.nix` files (github raw HTTP, falling back
+to `nix`); any fetch failure is a silent no-op. **Multi-version inputs and
+transitive dead overrides stay report-only** — collapsing or relocating them is
+not a local mechanical edit — so `--fix` still exits non-zero if any such
+finding (or any residual auto-fixable one) remains afterward. If `flake.nix`
+can't be parsed or has no editable `inputs` attrset, `--fix` prints the changes
+to make by hand and exits non-zero rather than risk corrupting the file.
 
 `--format` (default `auto`) selects the output: `text` is the bordered
 human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON schema
-(`tap-ndjson(7)`) — one JSON record per line: a leading `plan` record, the two
-checks as top-level test points each with their findings as nested subtests,
-and a trailing `summary` record; `json` is a single indented JSON document.
-`auto` emits `text` when stdout is a TTY and `ndjson` otherwise, so piping or
-redirecting `lint` yields machine-readable output without a flag.
+(`tap-ndjson(7)`) — one JSON record per line: a leading `plan` record, the
+three checks as top-level test points each with their findings as nested
+subtests, and a trailing `summary` record; `json` is a single indented JSON
+document. `auto` emits `text` when stdout is a TTY and `ndjson` otherwise, so
+piping or redirecting `lint` yields machine-readable output without a flag.
 
-The leading `{"type":"plan","count":2}` record is the schema's normative plan
-record: lint knows its fixed two checks up front, so it announces them as the
+The leading `{"type":"plan","count":3}` record is the schema's normative plan
+record: lint knows its fixed three checks up front, so it announces them as the
 first record, and the summary's `plan_count` matches that count.
 
-`lint` exits `1` when any follows or multi-version finding is reported, so it
-can run in CI as a gate against new input duplication.
+`lint` exits `1` when any follows, multi-version, or dead-override finding is
+reported, so it can run in CI as a gate against new input duplication and rot.
 
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.
