@@ -17,6 +17,11 @@ type Report struct {
 	Follows []FollowsRec
 	// MultiVersion lists source repositories pinned at more than one rev.
 	MultiVersion []MultiVersionInput
+	// DeadOverrides lists `follows` overrides whose target input the
+	// dependency does not declare. Unlike Follows / MultiVersion (computed
+	// from the lock alone by Analyze), these require the override bindings
+	// parsed from a flake.nix; see DeadOverrides. Analyze leaves this nil.
+	DeadOverrides []DeadOverride
 }
 
 // FollowsRec recommends collapsing a set of nodes that pin an identical

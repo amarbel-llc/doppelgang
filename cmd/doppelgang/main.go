@@ -67,12 +67,14 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
-	fmt.Fprintf(os.Stderr, "inputs and flags inputs pinned at multiple revs. Exits 1 when any follows or\n")
-	fmt.Fprintf(os.Stderr, "multi-version finding is reported, so it can serve as a CI gate. --format=auto\n")
-	fmt.Fprintf(os.Stderr, "(the default) emits text on a TTY and tap NDJSON (amarbel-llc/tap) otherwise.\n")
-	fmt.Fprintf(os.Stderr, "--fix applies the follows-opportunity edits to <flake>/flake.nix, re-locks via\n")
-	fmt.Fprintf(os.Stderr, "`nix flake lock`, and stages the touched files (needs nix on PATH).\n")
-	fmt.Fprintf(os.Stderr, "Multi-version inputs stay report-only — collapsing them changes behavior.\n")
+	fmt.Fprintf(os.Stderr, "inputs, flags inputs pinned at multiple revs, and (reading <flake>/flake.nix)\n")
+	fmt.Fprintf(os.Stderr, "flags dead `follows` overrides that target an input the dependency no longer\n")
+	fmt.Fprintf(os.Stderr, "declares. Exits 1 when any finding is reported, so it can serve as a CI gate.\n")
+	fmt.Fprintf(os.Stderr, "--format=auto (the default) emits text on a TTY and tap NDJSON otherwise.\n")
+	fmt.Fprintf(os.Stderr, "--fix splices the follows-opportunity edits into <flake>/flake.nix and prunes\n")
+	fmt.Fprintf(os.Stderr, "direct dead overrides, then re-locks via `nix flake lock` and stages the touched\n")
+	fmt.Fprintf(os.Stderr, "files (needs nix on PATH). Multi-version inputs and transitive dead overrides\n")
+	fmt.Fprintf(os.Stderr, "stay report-only — collapsing/relocating them is not a local mechanical edit.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -145,12 +147,12 @@ func lintMain(args []string) int {
 		return 2
 	}
 
-	lock, err := flakelock.Load(*flakeDir)
+	report, err := analyzeFlake(*flakeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1
 	}
-	sum := render.LintSummary{Report: lint.Analyze(lock)}
+	sum := render.LintSummary{Report: report}
 
 	var renderErr error
 	switch resolved {
@@ -166,39 +168,98 @@ func lintMain(args []string) int {
 	}
 
 	if *fix {
-		return lintFix(*flakeDir, sum.Report)
+		return lintFix(*flakeDir, report)
 	}
 
 	// Exit non-zero when actionable findings exist so `lint` can serve
 	// as a CI gate.
-	if len(sum.Report.Follows) > 0 || len(sum.Report.MultiVersion) > 0 {
+	if reportHasFindings(report) {
 		return 1
 	}
 	return 0
 }
 
-// lintFix applies the follows-opportunity edits from report to
-// <flakeDir>/flake.nix, re-locks via `nix flake lock`, stages the
-// touched files, and re-analyzes the regenerated lock to compute an
-// honest exit code. It is invoked only under --fix, after the report has
-// already been rendered.
+// analyzeFlake runs the lock-only checks on <flakeDir>/flake.lock and, when
+// <flakeDir>/flake.nix is present and parseable, the direct dead-override
+// check on top. A missing or unparseable flake.nix degrades dead-override
+// detection to skipped (the lock-only report is returned) rather than failing
+// the run, so `lint` stays useful in an unbuilt checkout. Detection is fully
+// offline; only --fix's re-lock needs nix.
+func analyzeFlake(flakeDir string) (lint.Report, error) {
+	lock, err := flakelock.Load(flakeDir)
+	if err != nil {
+		return lint.Report{}, err
+	}
+	report := lint.Analyze(lock)
+	report.DeadOverrides = directDeadOverrides(flakeDir, lock)
+	return report, nil
+}
+
+// directDeadOverrides reads <flakeDir>/flake.nix and returns the dead follows
+// overrides declared there. A read failure yields nil (an unbuilt checkout
+// may have no flake.nix to inspect); an unparseable flake.nix yields nil with
+// a stderr note. Either way detection is skipped, never fatal.
+func directDeadOverrides(flakeDir string, lock *flakelock.Lock) []lint.DeadOverride {
+	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	if err != nil {
+		return nil
+	}
+	overrides, err := nixedit.Overrides(src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: flake.nix not parseable; skipping dead-override detection (%v)\n", err)
+		return nil
+	}
+	return lint.DeadOverrides(lock, overrides)
+}
+
+// reportHasFindings reports whether any of the three checks found something
+// actionable, used to gate the non-zero CI exit.
+func reportHasFindings(r lint.Report) bool {
+	return len(r.Follows) > 0 || len(r.MultiVersion) > 0 || len(r.DeadOverrides) > 0
+}
+
+// reportOnlyCount counts findings --fix cannot auto-resolve: multi-version
+// inputs (collapsing them changes behavior) and transitive dead overrides
+// (the fix lands in an upstream flake.nix, not this one).
+func reportOnlyCount(r lint.Report) int {
+	n := len(r.MultiVersion)
+	for _, d := range r.DeadOverrides {
+		if !d.Direct {
+			n++
+		}
+	}
+	return n
+}
+
+// lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
+// — splicing in follows-opportunity lines and pruning direct dead follows
+// overrides — then re-locks via `nix flake lock`, stages the touched files,
+// and re-analyzes to compute an honest exit code. It is invoked only under
+// --fix, after the report has already been rendered.
 //
-// Multi-version findings are never auto-collapsed (choosing a revision
-// changes behavior), so they are reported only and keep the exit code
-// non-zero. The exit code is 0 only when, after the fix, neither follows
-// nor multi-version findings remain.
+// Two finding classes are report-only and never auto-resolved: multi-version
+// inputs (choosing a revision changes behavior) and transitive dead overrides
+// (the offending binding lives in an upstream flake.nix). Either keeps the
+// exit code non-zero. The exit is 0 only when, after the fix, no finding of
+// any category remains.
 //
 // All progress goes to stderr so it does not pollute the machine-readable
 // report already written to stdout.
 func lintFix(flakeDir string, report lint.Report) int {
-	var lines []string
+	var followsLines []string
 	for _, r := range report.Follows {
-		lines = append(lines, r.Lines...)
+		followsLines = append(followsLines, r.Lines...)
+	}
+	var deadTargets []string
+	for _, d := range report.DeadOverrides {
+		if d.Direct {
+			deadTargets = append(deadTargets, d.Override)
+		}
 	}
 
-	if len(lines) == 0 {
-		if len(report.MultiVersion) > 0 {
-			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: no follows opportunities to apply; %d multi-version input(s) remain (report-only, not auto-collapsed)\n", len(report.MultiVersion))
+	if len(followsLines) == 0 && len(deadTargets) == 0 {
+		if remaining := reportOnlyCount(report); remaining > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing to fix\n")
@@ -212,23 +273,44 @@ func lintFix(flakeDir string, report lint.Report) int {
 		return 1
 	}
 
-	out, applied, err := nixedit.Apply(src, lines)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not edit %s automatically (%v).\n"+
-			"Apply the follows line(s) above by hand, then re-run `nix flake lock`.\n", nixPath, err)
-		return 1
+	out := src
+	var appliedFollows []string
+	if len(followsLines) > 0 {
+		out, appliedFollows, err = nixedit.Apply(out, followsLines)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not edit %s automatically (%v).\n"+
+				"Apply the follows line(s) above by hand, then re-run `nix flake lock`.\n", nixPath, err)
+			return 1
+		}
+	}
+	var removed []string
+	if len(deadTargets) > 0 {
+		out, removed, err = nixedit.DeleteBindings(out, deadTargets)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not prune dead override(s) from %s automatically (%v).\n"+
+				"Remove the dead follows line(s) above by hand, then re-run `nix flake lock`.\n", nixPath, err)
+			return 1
+		}
 	}
 
-	if len(applied) == 0 {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: follows already present in flake.nix; nothing to apply\n")
+	if len(appliedFollows) == 0 && len(removed) == 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
 	} else {
 		if err := os.WriteFile(nixPath, out, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: write %s: %v\n", nixPath, err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: applied %d follows line(s) to %s:\n", len(applied), nixPath)
-		for _, l := range applied {
-			fmt.Fprintf(os.Stderr, "    %s\n", l)
+		if len(appliedFollows) > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: applied %d follows line(s) to %s:\n", len(appliedFollows), nixPath)
+			for _, l := range appliedFollows {
+				fmt.Fprintf(os.Stderr, "    %s\n", l)
+			}
+		}
+		if len(removed) > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pruned %d dead follows override(s) from %s:\n", len(removed), nixPath)
+			for _, l := range removed {
+				fmt.Fprintf(os.Stderr, "    %s\n", l)
+			}
 		}
 		if err := relock(flakeDir); err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-lock failed: %v\n", err)
@@ -237,15 +319,19 @@ func lintFix(flakeDir string, report lint.Report) int {
 		stageFixedFiles(flakeDir)
 	}
 
-	// Re-analyze the (possibly regenerated) lock for an honest exit code.
-	lock, err := flakelock.Load(flakeDir)
+	// Re-analyze the (possibly regenerated) lock + edited flake.nix for an
+	// honest exit code.
+	after, err := analyzeFlake(flakeDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: reload flake.lock: %v\n", err)
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
 	}
-	after := lint.Analyze(lock)
 	if len(after.Follows) > 0 {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d follows opportunity group(s) remain after fix (re-run lint for detail)\n", len(after.Follows))
+		return 1
+	}
+	if n := len(after.DeadOverrides); n > 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d dead override(s) remain after fix (transitive overrides are fixed in the upstream flake.nix, not here)\n", n)
 		return 1
 	}
 	if len(after.MultiVersion) > 0 {

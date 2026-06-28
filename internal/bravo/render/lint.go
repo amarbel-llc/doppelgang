@@ -55,7 +55,43 @@ func LintText(w io.Writer, s LintSummary) error {
 		}
 	}
 
+	if _, err := fmt.Fprintf(w, "\n── dead follows overrides ──\n"); err != nil {
+		return err
+	}
+	if len(s.Report.DeadOverrides) == 0 {
+		if _, err := fmt.Fprintln(w, "(no follows override targets a non-existent input)"); err != nil {
+			return err
+		}
+	}
+	for _, d := range s.Report.DeadOverrides {
+		if _, err := fmt.Fprintf(w, "%s%s: %q has no input %q (%s)\n",
+			deadVia(d), d.Override, d.Target, d.Input, deadTag(d)); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// deadTag renders the direct/transitive tag for a dead override, including
+// the upstream-fix hint for transitive ones.
+func deadTag(d lint.DeadOverride) string {
+	if d.Direct {
+		return "direct"
+	}
+	if d.Via != "" {
+		return "transitive; fix in " + d.Via
+	}
+	return "transitive"
+}
+
+// deadVia renders the optional "<upstream> → " prefix for a transitive dead
+// override, naming the flake whose flake.nix carries the binding.
+func deadVia(d lint.DeadOverride) string {
+	if d.Via == "" {
+		return ""
+	}
+	return d.Via + " → "
 }
 
 // LintJSON writes the lint summary as a single indented JSON document.
@@ -73,12 +109,21 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Source   string        `json:"source"`
 		Versions []jsonVersion `json:"versions"`
 	}
+	type jsonDead struct {
+		Override string `json:"override"`
+		Target   string `json:"target"`
+		Input    string `json:"input"`
+		Direct   bool   `json:"direct"`
+		Via      string `json:"via,omitempty"`
+	}
 	out := struct {
-		Follows      []jsonFollows `json:"followsOpportunities"`
-		MultiVersion []jsonMulti   `json:"multiVersionInputs"`
+		Follows       []jsonFollows `json:"followsOpportunities"`
+		MultiVersion  []jsonMulti   `json:"multiVersionInputs"`
+		DeadOverrides []jsonDead    `json:"deadOverrides"`
 	}{
-		Follows:      make([]jsonFollows, 0, len(s.Report.Follows)),
-		MultiVersion: make([]jsonMulti, 0, len(s.Report.MultiVersion)),
+		Follows:       make([]jsonFollows, 0, len(s.Report.Follows)),
+		MultiVersion:  make([]jsonMulti, 0, len(s.Report.MultiVersion)),
+		DeadOverrides: make([]jsonDead, 0, len(s.Report.DeadOverrides)),
 	}
 	for _, r := range s.Report.Follows {
 		out.Follows = append(out.Follows, jsonFollows{
@@ -92,13 +137,18 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		}
 		out.MultiVersion = append(out.MultiVersion, jm)
 	}
+	for _, d := range s.Report.DeadOverrides {
+		out.DeadOverrides = append(out.DeadOverrides, jsonDead{
+			Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
+		})
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }
 
 // ndjsonTest is one record in the amarbel-llc/tap test-result NDJSON
-// schema (tap-ndjson(7)). `lint` maps its two checks onto top-level test
+// schema (tap-ndjson(7)). `lint` maps its three checks onto top-level test
 // points and each finding onto a nested subtest; Directive and Output are
 // always null here because lint findings have neither concept.
 type ndjsonTest struct {
@@ -118,7 +168,7 @@ type ndjsonTest struct {
 // is a normative record type in the tap NDJSON schema (tap-ndjson(7)): a
 // producer that knows its plan up front SHOULD emit the plan record first,
 // and the summary's plan_count MUST equal this count. lint always runs
-// exactly two checks, so it emits the plan unconditionally.
+// exactly three checks, so it emits the plan unconditionally.
 type ndjsonPlan struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`
@@ -155,11 +205,20 @@ type ndjsonMultiVer struct {
 	Path string `json:"path"`
 }
 
+type ndjsonDeadDiag struct {
+	Override string `json:"override"`
+	Target   string `json:"target"`
+	Input    string `json:"input"`
+	Direct   bool   `json:"direct"`
+	Via      string `json:"via,omitempty"`
+}
+
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
-// NDJSON schema: one JSON object per line. The two flake.lock checks are
-// emitted as top-level `test` records (ok when the check found nothing),
-// each finding becomes a nested subtest carrying a structured diagnostic,
-// and a trailing `summary` record reports the check pass/fail counts.
+// NDJSON schema: one JSON object per line. The three checks (follows
+// opportunities, multi-version inputs, dead follows overrides) are emitted
+// as top-level `test` records (ok when the check found nothing), each finding
+// becomes a nested subtest carrying a structured diagnostic, and a trailing
+// `summary` record reports the check pass/fail counts.
 // Subtests do not count toward the summary per the schema. The document
 // is always valid and never bailed: lint generates records rather than
 // transforming a TAP stream, so there are no parse diagnostics.
@@ -208,7 +267,23 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		})
 	}
 
-	checks := []ndjsonTest{follows, multi}
+	dead := ndjsonTest{
+		Type:        "test",
+		N:           3,
+		Description: "dead follows overrides",
+		OK:          len(s.Report.DeadOverrides) == 0,
+	}
+	for i, d := range s.Report.DeadOverrides {
+		dead.Subtest = append(dead.Subtest, ndjsonTest{
+			Type:        "test",
+			N:           i + 1,
+			Description: fmt.Sprintf("%s: %q has no input %q", d.Override, d.Target, d.Input),
+			OK:          false,
+			Diagnostic:  ndjsonDeadDiag{Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via},
+		})
+	}
+
+	checks := []ndjsonTest{follows, multi, dead}
 
 	// Announce the plan up front, then the per-check test points, then the
 	// trailing summary.

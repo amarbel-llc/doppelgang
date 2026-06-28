@@ -96,6 +96,55 @@ func TestFollowsRecPrunesPathPrefixShadow(t *testing.T) {
 	}
 }
 
+// deadOverrideLock: root pins a real dependency `dep` whose own declared
+// inputs are `keep` (a legitimate follows, array form) and `real` (a node
+// edge). An override targeting `dep`'s `gone` input is dead (dep declares
+// no `gone`); overrides targeting `keep` or `real` are live. An override on
+// `absent` (not even a node input of root) cannot be resolved and must be
+// skipped, not flagged.
+const deadOverrideLock = `{
+  "nodes": {
+    "root": { "inputs": { "dep": "dep", "real": "real" } },
+    "dep": {
+      "inputs": { "keep": ["keep"], "real": "real" },
+      "locked": { "type": "github", "owner": "o", "repo": "dep", "rev": "ddd", "narHash": "sha-d" }
+    },
+    "real": { "locked": { "type": "github", "owner": "o", "repo": "real", "rev": "rrr", "narHash": "sha-r" } }
+  },
+  "root": "root",
+  "version": 7
+}`
+
+func TestDeadOverridesFlagsOnlyDeadOnes(t *testing.T) {
+	l, err := flakelock.Parse([]byte(deadOverrideLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := DeadOverrides(l, []string{
+		`inputs.dep.inputs.gone.follows`, // dead: dep has no `gone`
+		`inputs.dep.inputs.keep.follows`, // live: dep declares `keep` (follows)
+		`inputs.dep.inputs.real.follows`, // live: dep declares `real` (node)
+		`inputs.absent.inputs.x.follows`, // skip: `absent` is not a node input of root
+		`inputs.dep.follows`,             // skip: top-level follows, not a dependency override
+	})
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 dead override, got %d: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Override != `inputs.dep.inputs.gone.follows` {
+		t.Errorf("Override = %q, want inputs.dep.inputs.gone.follows", d.Override)
+	}
+	if d.Target != "dep" {
+		t.Errorf("Target = %q, want dep", d.Target)
+	}
+	if d.Input != "gone" {
+		t.Errorf("Input = %q, want gone", d.Input)
+	}
+	if !d.Direct {
+		t.Errorf("Direct = false, want true (overrides came from the linted flake.nix)")
+	}
+}
+
 // multiVersionLock: two distinct revs of NixOS/nixpkgs reachable from root.
 const multiVersionLock = `{
   "nodes": {

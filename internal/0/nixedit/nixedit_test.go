@@ -33,6 +33,241 @@ const flatForm = `{
 }
 `
 
+// sameSet reports whether got and want contain the same strings regardless
+// of order.
+func sameSet(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, g := range got {
+		seen[g]++
+	}
+	for _, w := range want {
+		seen[w]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// TestOverridesBlockForm extracts flat-in-block follows overrides — the
+// shape this repo and eng use (`dep.inputs.x.follows` written directly in
+// the `inputs = { … }` block).
+func TestOverridesBlockForm(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+    igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "igloo";
+  };
+  outputs = { self, igloo }: { };
+}
+`
+	got, err := Overrides([]byte(src))
+	if err != nil {
+		t.Fatalf("Overrides: %v", err)
+	}
+	want := []string{
+		`inputs.igloo.inputs.nixpkgs-master.follows`,
+		`inputs.treefmt-nix.inputs.nixpkgs.follows`,
+	}
+	if !sameSet(got, want) {
+		t.Errorf("Overrides = %v, want %v", got, want)
+	}
+}
+
+// TestOverridesNestedBlockForm extracts overrides written inside a nested
+// sub-attrset input value — the shape tacky uses
+// (`bats = { inputs.nixpkgs.follows = …; }`). This requires descending into
+// the opaque group value by re-parsing it.
+func TestOverridesNestedBlockForm(t *testing.T) {
+	const src = `{
+  inputs = {
+    nixpkgs.url = "github:amarbel-llc/nixpkgs";
+    bats = {
+      url = "github:amarbel-llc/bats";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.utils.follows = "utils";
+    };
+  };
+  outputs = { self }: { };
+}
+`
+	got, err := Overrides([]byte(src))
+	if err != nil {
+		t.Fatalf("Overrides: %v", err)
+	}
+	want := []string{
+		`inputs.bats.inputs.nixpkgs.follows`,
+		`inputs.bats.inputs.utils.follows`,
+	}
+	if !sameSet(got, want) {
+		t.Errorf("Overrides = %v, want %v", got, want)
+	}
+}
+
+// TestOverridesFlatForm extracts overrides from top-level flat
+// `inputs.<dep>.inputs.<x>.follows` bindings (no `inputs = { … }` block).
+func TestOverridesFlatForm(t *testing.T) {
+	const src = `{
+  inputs.igloo.url = "github:amarbel-llc/igloo";
+  inputs.utils.inputs.systems.follows = "igloo/systems";
+  outputs = { self }: { };
+}
+`
+	got, err := Overrides([]byte(src))
+	if err != nil {
+		t.Fatalf("Overrides: %v", err)
+	}
+	want := []string{`inputs.utils.inputs.systems.follows`}
+	if !sameSet(got, want) {
+		t.Errorf("Overrides = %v, want %v", got, want)
+	}
+}
+
+// TestOverridesNoneWhenNoFollows returns an empty slice (not an error) for a
+// flake with inputs but no follows overrides.
+func TestOverridesNoneWhenNoFollows(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+  };
+  outputs = { self }: { };
+}
+`
+	got, err := Overrides([]byte(src))
+	if err != nil {
+		t.Fatalf("Overrides: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Overrides = %v, want empty", got)
+	}
+}
+
+// TestDeleteBindingsFlatInBlock removes a flat-in-block override
+// (`treefmt-nix.inputs.nixpkgs.follows`) and confirms its sibling bindings
+// survive and the line is excised cleanly (no blank-line scar).
+func TestDeleteBindingsFlatInBlock(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "igloo";
+  };
+  outputs = { self }: { };
+}
+`
+	out, removed, err := DeleteBindings([]byte(src), []string{`inputs.treefmt-nix.inputs.nixpkgs.follows`})
+	if err != nil {
+		t.Fatalf("DeleteBindings: %v", err)
+	}
+	if !sameSet(removed, []string{`inputs.treefmt-nix.inputs.nixpkgs.follows`}) {
+		t.Fatalf("removed = %v, want the one override", removed)
+	}
+	s := string(out)
+	if strings.Contains(s, "follows") {
+		t.Errorf("override not removed:\n%s", s)
+	}
+	if !strings.Contains(s, `treefmt-nix.url = "github:numtide/treefmt-nix";`) {
+		t.Errorf("clobbered sibling binding:\n%s", s)
+	}
+	if !strings.Contains(s, `igloo.url = "github:amarbel-llc/igloo";`) {
+		t.Errorf("clobbered earlier binding:\n%s", s)
+	}
+	if strings.Contains(s, "\n\n  };") {
+		t.Errorf("deletion left a blank-line scar before the closing brace:\n%s", s)
+	}
+}
+
+// TestDeleteBindingsNested removes an override nested inside a sub-attrset
+// input value (`bats = { inputs.nixpkgs.follows = …; }`) and confirms the
+// other bindings in that sub-attrset survive.
+func TestDeleteBindingsNested(t *testing.T) {
+	const src = `{
+  inputs = {
+    nixpkgs.url = "github:amarbel-llc/nixpkgs";
+    bats = {
+      url = "github:amarbel-llc/bats";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.utils.follows = "utils";
+    };
+  };
+  outputs = { self }: { };
+}
+`
+	out, removed, err := DeleteBindings([]byte(src), []string{`inputs.bats.inputs.nixpkgs.follows`})
+	if err != nil {
+		t.Fatalf("DeleteBindings: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %v, want 1", removed)
+	}
+	s := string(out)
+	if strings.Contains(s, "inputs.nixpkgs.follows") {
+		t.Errorf("dead override not removed:\n%s", s)
+	}
+	if !strings.Contains(s, `inputs.utils.follows = "utils";`) {
+		t.Errorf("clobbered sibling follows:\n%s", s)
+	}
+	if !strings.Contains(s, `nixpkgs.url = "github:amarbel-llc/nixpkgs";`) {
+		t.Errorf("clobbered nixpkgs.url:\n%s", s)
+	}
+	if !strings.Contains(s, `url = "github:amarbel-llc/bats";`) {
+		t.Errorf("clobbered bats url:\n%s", s)
+	}
+}
+
+// TestDeleteBindingsFlatTopLevel removes a flat top-level override binding.
+func TestDeleteBindingsFlatTopLevel(t *testing.T) {
+	const src = `{
+  inputs.igloo.url = "github:amarbel-llc/igloo";
+  inputs.igloo.inputs.gone.follows = "igloo";
+  outputs = { self }: { };
+}
+`
+	out, removed, err := DeleteBindings([]byte(src), []string{`inputs.igloo.inputs.gone.follows`})
+	if err != nil {
+		t.Fatalf("DeleteBindings: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %v, want 1", removed)
+	}
+	s := string(out)
+	if strings.Contains(s, "follows") {
+		t.Errorf("override not removed:\n%s", s)
+	}
+	if !strings.Contains(s, `inputs.igloo.url = "github:amarbel-llc/igloo";`) {
+		t.Errorf("clobbered sibling:\n%s", s)
+	}
+}
+
+// TestDeleteBindingsNotFoundNoop confirms a target that is not present is a
+// no-op (no error, source unchanged).
+func TestDeleteBindingsNotFoundNoop(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+  };
+  outputs = { self }: { };
+}
+`
+	out, removed, err := DeleteBindings([]byte(src), []string{`inputs.absent.inputs.x.follows`})
+	if err != nil {
+		t.Fatalf("DeleteBindings: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want none", removed)
+	}
+	if string(out) != src {
+		t.Errorf("no-op delete changed the file:\n%s", out)
+	}
+}
+
 func TestApplyBlockForm(t *testing.T) {
 	lines := []string{
 		`inputs.utils.inputs.systems.follows = "igloo/systems"`,

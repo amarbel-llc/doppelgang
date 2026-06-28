@@ -18,6 +18,15 @@ test: fmt test-go
 test-go:
   nix flake check --show-trace
 
+# Fast per-package `go test` for the agent TDD dev-loop. Runs in the devshell
+# (seconds, sees untracked files) rather than the nix sandbox, so it is the
+# loop to iterate against; the authoritative sandboxed run remains `test-go`
+# (nix flake check), which the merge pre-merge hook (`just`) runs.
+# Usage: just test-go-pkg internal/alfa/lint
+[group('debug')]
+test-go-pkg PKG:
+  go test ./{{PKG}}/...
+
 # Self-consume: run `doppelgang lint` against this repo's own flake.lock.
 # Surfaces follows opportunities and multi-version inputs in our own
 # inputs. Recipe (and `just`) fails when lint reports findings.

@@ -63,13 +63,13 @@ func TestLintNDJSONClean(t *testing.T) {
 	}
 
 	recs := decodeNDJSON(t, buf.Bytes())
-	if len(recs) != 4 {
-		t.Fatalf("want 4 records (plan + 2 checks + summary), got %d:\n%s", len(recs), buf.String())
+	if len(recs) != 5 {
+		t.Fatalf("want 5 records (plan + 3 checks + summary), got %d:\n%s", len(recs), buf.String())
 	}
-	plan, follows, multi, summary := recs[0], recs[1], recs[2], recs[3]
+	plan, follows, multi, dead, summary := recs[0], recs[1], recs[2], recs[3], recs[4]
 
-	if plan.Type != "plan" || plan.Count != 2 {
-		t.Errorf("first record must be plan with count 2, got %+v", plan)
+	if plan.Type != "plan" || plan.Count != 3 {
+		t.Errorf("first record must be plan with count 3, got %+v", plan)
 	}
 	if follows.Type != "test" || follows.N != 1 || follows.Description != "follows opportunities" {
 		t.Errorf("unexpected follows header: %+v", follows)
@@ -77,10 +77,13 @@ func TestLintNDJSONClean(t *testing.T) {
 	if multi.Type != "test" || multi.N != 2 || multi.Description != "multi-version inputs" {
 		t.Errorf("unexpected multi-version header: %+v", multi)
 	}
-	if !follows.OK || !multi.OK {
-		t.Errorf("clean checks must be ok: follows.OK=%v multi.OK=%v", follows.OK, multi.OK)
+	if dead.Type != "test" || dead.N != 3 || dead.Description != "dead follows overrides" {
+		t.Errorf("unexpected dead-overrides header: %+v", dead)
 	}
-	for _, c := range []ndjsonRec{follows, multi} {
+	if !follows.OK || !multi.OK || !dead.OK {
+		t.Errorf("clean checks must be ok: follows.OK=%v multi.OK=%v dead.OK=%v", follows.OK, multi.OK, dead.OK)
+	}
+	for _, c := range []ndjsonRec{follows, multi, dead} {
 		if len(c.Subtest) != 0 {
 			t.Errorf("clean check %q must have no subtests, got %d", c.Description, len(c.Subtest))
 		}
@@ -93,7 +96,7 @@ func TestLintNDJSONClean(t *testing.T) {
 	if summary.Type != "summary" {
 		t.Fatalf("final record must be summary, got %q", summary.Type)
 	}
-	if summary.Passed != 2 || summary.Failed != 0 || summary.Total != 2 || summary.PlanCount != 2 {
+	if summary.Passed != 3 || summary.Failed != 0 || summary.Total != 3 || summary.PlanCount != 3 {
 		t.Errorf("clean summary counts wrong: %+v", summary)
 	}
 	if summary.Bailed || !summary.Valid {
@@ -126,13 +129,13 @@ func TestLintNDJSONFindings(t *testing.T) {
 		t.Fatalf("LintNDJSON: %v", err)
 	}
 	recs := decodeNDJSON(t, buf.Bytes())
-	if len(recs) != 4 {
-		t.Fatalf("want 4 top-level records, got %d:\n%s", len(recs), buf.String())
+	if len(recs) != 5 {
+		t.Fatalf("want 5 top-level records, got %d:\n%s", len(recs), buf.String())
 	}
-	plan, follows, multi, summary := recs[0], recs[1], recs[2], recs[3]
+	plan, follows, multi, summary := recs[0], recs[1], recs[2], recs[4]
 
-	if plan.Type != "plan" || plan.Count != 2 {
-		t.Errorf("first record must be plan with count 2, got %+v", plan)
+	if plan.Type != "plan" || plan.Count != 3 {
+		t.Errorf("first record must be plan with count 3, got %+v", plan)
 	}
 	if follows.OK {
 		t.Errorf("follows check with a finding must not be ok")
@@ -181,7 +184,69 @@ func TestLintNDJSONFindings(t *testing.T) {
 		t.Errorf("rev must not be shortened, got %q", md.Versions[0].Rev)
 	}
 
-	if summary.Passed != 0 || summary.Failed != 2 || summary.Total != 2 {
+	// follows + multi fail; the dead-overrides check is clean here, so it
+	// passes — 1 passed, 2 failed, 3 total.
+	if summary.Passed != 1 || summary.Failed != 2 || summary.Total != 3 || summary.PlanCount != 3 {
 		t.Errorf("summary counts wrong with findings: %+v", summary)
+	}
+}
+
+// TestLintDeadOverridesRendering covers the third finding category in text
+// and NDJSON: a direct dead override is named with its target and missing
+// input, and the NDJSON dead-overrides check carries a structured diagnostic.
+func TestLintDeadOverridesRendering(t *testing.T) {
+	rep := lint.Report{
+		DeadOverrides: []lint.DeadOverride{{
+			Override: `inputs.nebulous.inputs.chrest.follows`,
+			Target:   "nebulous",
+			Input:    "chrest",
+			Direct:   true,
+		}},
+	}
+
+	var text bytes.Buffer
+	if err := LintText(&text, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	ts := text.String()
+	if !strings.Contains(ts, "── dead follows overrides ──") {
+		t.Errorf("missing dead-overrides section header:\n%s", ts)
+	}
+	if !strings.Contains(ts, `inputs.nebulous.inputs.chrest.follows: "nebulous" has no input "chrest" (direct)`) {
+		t.Errorf("dead-override line missing/wrong:\n%s", ts)
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, nd.Bytes())
+	if len(recs) != 5 {
+		t.Fatalf("want 5 records, got %d:\n%s", len(recs), nd.String())
+	}
+	dead := recs[3]
+	if dead.Description != "dead follows overrides" || dead.OK {
+		t.Errorf("dead check with a finding must not be ok: %+v", dead)
+	}
+	if len(dead.Subtest) != 1 {
+		t.Fatalf("want 1 dead subtest, got %d", len(dead.Subtest))
+	}
+	var dd struct {
+		Override string `json:"override"`
+		Target   string `json:"target"`
+		Input    string `json:"input"`
+		Direct   bool   `json:"direct"`
+	}
+	if err := json.Unmarshal(dead.Subtest[0].Diagnostic, &dd); err != nil {
+		t.Fatalf("dead subtest diagnostic is not an object: %v", err)
+	}
+	if dd.Override != `inputs.nebulous.inputs.chrest.follows` || dd.Target != "nebulous" || dd.Input != "chrest" || !dd.Direct {
+		t.Errorf("dead diagnostic wrong: %+v", dd)
+	}
+
+	// The summary must now count three checks, one of them failed.
+	summary := recs[4]
+	if summary.Total != 3 || summary.Failed != 1 || summary.Passed != 2 {
+		t.Errorf("summary counts wrong: %+v", summary)
 	}
 }
