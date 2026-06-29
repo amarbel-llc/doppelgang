@@ -10,7 +10,8 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
                  [--top N] [--by-owner] [--json]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
-doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--online] [--fix]
+doppelgang lint [--flake .] [--format auto|text|json|ndjson]
+                [--checks follows,multi-version,dead-overrides] [--online] [--fix]
 doppelgang version
 ```
 
@@ -75,20 +76,34 @@ finding (or any residual auto-fixable one) remains afterward. If `flake.nix`
 can't be parsed or has no editable `inputs` attrset, `--fix` prints the changes
 to make by hand and exits non-zero rather than risk corrupting the file.
 
+`--checks` restricts the run to a comma-separated subset of `follows`,
+`multi-version`, and `dead-overrides` (default: all three; `all` is an alias;
+an unknown name exits `2`). The selection gates **everything**: only the chosen
+checks are rendered (in every `--format`), counted toward the non-zero exit, and
+auto-fixed by `--fix`. This lets a caller gate on a chosen subset — e.g. a flake
+that intentionally pins inputs at multiple revisions can run
+`--checks follows,dead-overrides` to exclude the report-only `multi-version`
+check from its CI gate. The expensive dead-override pass (which parses
+`flake.nix` and may fetch upstream files) is skipped entirely when
+`dead-overrides` is deselected.
+
 `--format` (default `auto`) selects the output: `text` is the bordered
 human-readable view; `ndjson` is the amarbel-llc/tap test-result NDJSON schema
 (`tap-ndjson(7)`) — one JSON record per line: a leading `plan` record, the
-three checks as top-level test points each with their findings as nested
+selected checks as top-level test points each with their findings as nested
 subtests, and a trailing `summary` record; `json` is a single indented JSON
-document. `auto` emits `text` when stdout is a TTY and `ndjson` otherwise, so
-piping or redirecting `lint` yields machine-readable output without a flag.
+document (a deselected check's key is omitted, distinguishing "not checked"
+from "checked, clean"). `auto` emits `text` when stdout is a TTY and `ndjson`
+otherwise, so piping or redirecting `lint` yields machine-readable output
+without a flag.
 
-The leading `{"type":"plan","count":3}` record is the schema's normative plan
-record: lint knows its fixed three checks up front, so it announces them as the
-first record, and the summary's `plan_count` matches that count.
+The leading `{"type":"plan","count":N}` record is the schema's normative plan
+record: lint knows its plan up front — `N` is the number of *selected* checks
+(three by default, fewer under `--checks`) — so it announces them as the first
+record, and the summary's `plan_count` matches that count.
 
-`lint` exits `1` when any follows, multi-version, or dead-override finding is
-reported, so it can run in CI as a gate against new input duplication and rot.
+`lint` exits `1` when any *selected* check reports a finding, so it can run in
+CI as a gate against new input duplication and rot (over the chosen subset).
 
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.

@@ -250,3 +250,103 @@ func TestLintDeadOverridesRendering(t *testing.T) {
 		t.Errorf("summary counts wrong: %+v", summary)
 	}
 }
+
+// reportAllThree is a report with a finding in every check category, used
+// to prove the --checks selection excludes a deselected check from both the
+// count and the emitted records.
+func reportAllThree() lint.Report {
+	return lint.Report{
+		Follows: []lint.FollowsRec{{
+			Identity: "o/r", Canonical: "nixpkgs", NodeCount: 2,
+			Lines: []string{`inputs.r.inputs.systems.follows = "nixpkgs"`},
+		}},
+		MultiVersion: []lint.MultiVersionInput{{
+			Source: "o/r",
+			Versions: []lint.InputVersion{
+				{Rev: "aaa", Path: "r"}, {Rev: "bbb", Path: "r/master"},
+			},
+		}},
+		DeadOverrides: []lint.DeadOverride{{
+			Override: `inputs.r.inputs.gone.follows`, Target: "r", Input: "gone", Direct: true,
+		}},
+	}
+}
+
+// TestLintNDJSONSelectionPlanCount is the ndjson plan-count regression for
+// #14: a follows+dead-overrides selection emits exactly those two test
+// points (renumbered 1..2), a plan/summary count of 2, and no multi-version
+// record — even though the report carries a multi-version finding.
+func TestLintNDJSONSelectionPlanCount(t *testing.T) {
+	sel, err := lint.ParseSelection("follows,dead-overrides")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := LintNDJSON(&buf, LintSummary{Report: reportAllThree(), Selection: sel}); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, buf.Bytes())
+	// plan + follows + dead + summary = 4 records (no multi-version).
+	if len(recs) != 4 {
+		t.Fatalf("want 4 records (plan + 2 checks + summary), got %d:\n%s", len(recs), buf.String())
+	}
+	plan, follows, dead, summary := recs[0], recs[1], recs[2], recs[3]
+	if plan.Type != "plan" || plan.Count != 2 {
+		t.Errorf("plan count must equal the 2 selected checks, got %+v", plan)
+	}
+	if follows.N != 1 || follows.Description != "follows opportunities" {
+		t.Errorf("first selected check must be follows at N=1, got %+v", follows)
+	}
+	if dead.N != 2 || dead.Description != "dead follows overrides" {
+		t.Errorf("second selected check must be dead-overrides renumbered to N=2, got %+v", dead)
+	}
+	for _, r := range recs {
+		if r.Description == "multi-version inputs" {
+			t.Errorf("deselected multi-version check must not be emitted:\n%s", buf.String())
+		}
+	}
+	if summary.Type != "summary" || summary.Total != 2 || summary.PlanCount != 2 || summary.Failed != 2 {
+		t.Errorf("summary must reflect 2 selected checks (both failing), got %+v", summary)
+	}
+}
+
+// TestLintJSONSelectionOmitsDeselected confirms the json format omits a
+// deselected check's key entirely (so a consumer can tell "not checked"
+// from "checked, clean") while keeping selected keys.
+func TestLintJSONSelectionOmitsDeselected(t *testing.T) {
+	sel, err := lint.ParseSelection("follows,dead-overrides")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := LintJSON(&buf, LintSummary{Report: reportAllThree(), Selection: sel}); err != nil {
+		t.Fatalf("LintJSON: %v", err)
+	}
+	s := buf.String()
+	if strings.Contains(s, "multiVersionInputs") {
+		t.Errorf("deselected multi-version key must be absent:\n%s", s)
+	}
+	if !strings.Contains(s, "followsOpportunities") || !strings.Contains(s, "deadOverrides") {
+		t.Errorf("selected keys must be present:\n%s", s)
+	}
+}
+
+// TestLintTextSelectionOmitsDeselected confirms the text format renders only
+// the selected check's section.
+func TestLintTextSelectionOmitsDeselected(t *testing.T) {
+	sel, err := lint.ParseSelection("follows")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := LintText(&buf, LintSummary{Report: reportAllThree(), Selection: sel}); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "── follows opportunities ──") {
+		t.Errorf("selected follows section missing:\n%s", s)
+	}
+	if strings.Contains(s, "multi-version inputs") || strings.Contains(s, "dead follows overrides") {
+		t.Errorf("deselected sections must not render:\n%s", s)
+	}
+}

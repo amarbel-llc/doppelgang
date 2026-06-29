@@ -59,6 +59,15 @@ explore-lint-online DIR=".": build-nix
 explore-lint-fix DIR: build-nix
   ./result/bin/doppelgang lint --fix --flake {{DIR}}
 
+# Run `doppelgang lint --checks <CHECKS> --flake <DIR>` and report the exit
+# code, for black-box validation of the --checks selector (issue #14): which
+# checks gate the non-zero exit, and (with `--format ndjson`) the plan count.
+# CHECKS is the comma-separated subset; pass extra args after `--`, e.g.
+# `just explore-lint-checks /tmp/flake follows,dead-overrides -- --format ndjson`.
+[group('explore')]
+explore-lint-checks DIR CHECKS *ARGS: build-nix
+  ./result/bin/doppelgang lint --flake {{DIR}} --checks {{CHECKS}} {{ARGS}}; echo "exit=$?"
+
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.
 fmt *ARGS:

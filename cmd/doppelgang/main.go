@@ -63,13 +63,17 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "  doppelgang dupes [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
-	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson] [--online] [--fix]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson]\n")
+	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides] [--online] [--fix]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
 	fmt.Fprintf(os.Stderr, "inputs, flags inputs pinned at multiple revs, and (reading <flake>/flake.nix)\n")
 	fmt.Fprintf(os.Stderr, "flags dead `follows` overrides that target an input the dependency no longer\n")
-	fmt.Fprintf(os.Stderr, "declares. Exits 1 when any finding is reported, so it can serve as a CI gate.\n")
+	fmt.Fprintf(os.Stderr, "declares. Exits 1 when any selected check reports a finding, so it can serve as\n")
+	fmt.Fprintf(os.Stderr, "a CI gate. --checks restricts to a comma-separated subset (follows,\n")
+	fmt.Fprintf(os.Stderr, "multi-version, dead-overrides; default all, 'all' is an alias) — it gates the\n")
+	fmt.Fprintf(os.Stderr, "exit code, the output, and --fix alike.\n")
 	fmt.Fprintf(os.Stderr, "--format=auto (the default) emits text on a TTY and tap NDJSON otherwise.\n")
 	fmt.Fprintf(os.Stderr, "--online additionally detects transitive dead overrides (declared in an upstream\n")
 	fmt.Fprintf(os.Stderr, "flake.nix) by fetching those files — read-only and best-effort. --fix splices the\n")
@@ -140,9 +144,16 @@ func lintMain(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ExitOnError)
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
 	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
+	checks := fs.String("checks", "", "comma-separated subset of checks to gate on: follows, multi-version, dead-overrides (default all; 'all' is an alias)")
 	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
 	online := fs.Bool("online", false, "additionally detect transitive dead overrides by fetching upstream flake.nix files (read-only, best-effort; implied by --fix)")
 	_ = fs.Parse(args)
+
+	sel, err := lint.ParseSelection(*checks)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
+		return 2
+	}
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
 	if err != nil {
@@ -152,13 +163,15 @@ func lintMain(ctx context.Context, args []string) int {
 
 	// Transitive dead-override detection fetches upstream flake.nix files, so
 	// it runs only when explicitly opted in: --online (read-only) or --fix
-	// (which is already impure). Plain `lint` stays offline.
-	report, err := analyzeFlake(ctx, *flakeDir, *fix || *online)
+	// (which is already impure). Plain `lint` stays offline. The selection
+	// also gates which checks are analyzed, rendered, and counted toward the
+	// exit code.
+	report, err := analyzeFlake(ctx, *flakeDir, sel, *fix || *online)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1
 	}
-	sum := render.LintSummary{Report: report}
+	sum := render.LintSummary{Report: report, Selection: sel}
 
 	var renderErr error
 	switch resolved {
@@ -174,37 +187,46 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 
 	if *fix {
-		return lintFix(ctx, *flakeDir, report)
+		return lintFix(ctx, *flakeDir, report, sel)
 	}
 
-	// Exit non-zero when actionable findings exist so `lint` can serve
-	// as a CI gate.
-	if reportHasFindings(report) {
+	// Exit non-zero when a *selected* check reports a finding so `lint` can
+	// serve as a CI gate over the chosen subset.
+	if reportHasFindings(report, sel) {
 		return 1
 	}
 	return 0
 }
 
 // analyzeFlake runs the lock-only checks on <flakeDir>/flake.lock and, when
-// <flakeDir>/flake.nix is present and parseable, the direct dead-override
-// check on top. A missing or unparseable flake.nix degrades dead-override
-// detection to skipped (the lock-only report is returned) rather than failing
-// the run, so `lint` stays useful in an unbuilt checkout. Direct detection is
-// fully offline.
+// the dead-overrides check is selected and <flakeDir>/flake.nix is present
+// and parseable, the direct dead-override check on top. A missing or
+// unparseable flake.nix degrades dead-override detection to skipped (the
+// lock-only report is returned) rather than failing the run, so `lint`
+// stays useful in an unbuilt checkout. Direct detection is fully offline.
 //
-// When online is true (the impure --fix run), it also attempts best-effort
-// detection of transitive dead overrides — those declared in an upstream
-// flake's flake.nix — by fetching those files. Any fetch failure is a silent
-// no-op, so transitive findings are present only when reachable.
-func analyzeFlake(ctx context.Context, flakeDir string, online bool) (lint.Report, error) {
+// The follows and multi-version analyses are lock-only and computed
+// unconditionally (filtering them is cheap and happens at render/exit
+// time); only the dead-overrides check — which parses flake.nix and may
+// fetch upstream files — is skipped when deselected, so a caller that
+// excludes it pays neither the parse-error note nor any network cost.
+//
+// When online is true (the impure --fix run) and dead-overrides is
+// selected, it also attempts best-effort detection of transitive dead
+// overrides — those declared in an upstream flake's flake.nix — by fetching
+// those files. Any fetch failure is a silent no-op, so transitive findings
+// are present only when reachable.
+func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool) (lint.Report, error) {
 	lock, err := flakelock.Load(flakeDir)
 	if err != nil {
 		return lint.Report{}, err
 	}
 	report := lint.Analyze(lock)
-	report.DeadOverrides = directDeadOverrides(flakeDir, lock)
-	if online {
-		report.DeadOverrides = append(report.DeadOverrides, transitiveDeadOverrides(ctx, lock)...)
+	if sel.Has(lint.CheckDeadOverrides) {
+		report.DeadOverrides = directDeadOverrides(flakeDir, lock)
+		if online {
+			report.DeadOverrides = append(report.DeadOverrides, transitiveDeadOverrides(ctx, lock)...)
+		}
 	}
 	return report, nil
 }
@@ -226,17 +248,35 @@ func directDeadOverrides(flakeDir string, lock *flakelock.Lock) []lint.DeadOverr
 	return lint.DeadOverrides(lock, overrides)
 }
 
-// reportHasFindings reports whether any of the three checks found something
-// actionable, used to gate the non-zero CI exit.
-func reportHasFindings(r lint.Report) bool {
-	return len(r.Follows) > 0 || len(r.MultiVersion) > 0 || len(r.DeadOverrides) > 0
+// reportHasFindings reports whether any *selected* check found something
+// actionable, used to gate the non-zero CI exit. A deselected check's
+// findings never contribute, so a caller can gate on a chosen subset.
+func reportHasFindings(r lint.Report, sel lint.Selection) bool {
+	if sel.Has(lint.CheckFollows) && len(r.Follows) > 0 {
+		return true
+	}
+	if sel.Has(lint.CheckMultiVersion) && len(r.MultiVersion) > 0 {
+		return true
+	}
+	if sel.Has(lint.CheckDeadOverrides) && len(r.DeadOverrides) > 0 {
+		return true
+	}
+	return false
 }
 
-// reportOnlyCount counts findings --fix cannot auto-resolve: multi-version
-// inputs (collapsing them changes behavior) and transitive dead overrides
-// (the fix lands in an upstream flake.nix, not this one).
-func reportOnlyCount(r lint.Report) int {
-	return len(r.MultiVersion) + transitiveCount(r)
+// reportOnlyCount counts selected findings --fix cannot auto-resolve:
+// multi-version inputs (collapsing them changes behavior) and transitive
+// dead overrides (the fix lands in an upstream flake.nix, not this one). A
+// deselected check contributes nothing.
+func reportOnlyCount(r lint.Report, sel lint.Selection) int {
+	n := 0
+	if sel.Has(lint.CheckMultiVersion) {
+		n += len(r.MultiVersion)
+	}
+	if sel.Has(lint.CheckDeadOverrides) {
+		n += transitiveCount(r)
+	}
+	return n
 }
 
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
@@ -253,20 +293,29 @@ func reportOnlyCount(r lint.Report) int {
 //
 // All progress goes to stderr so it does not pollute the machine-readable
 // report already written to stdout.
-func lintFix(ctx context.Context, flakeDir string, report lint.Report) int {
+//
+// The selection gates which classes are auto-fixed: follows lines only when
+// the follows check is selected, direct dead overrides only when the
+// dead-overrides check is selected. A deselected check is neither applied
+// nor counted toward the report-only accounting or the exit code.
+func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection) int {
 	var followsLines []string
-	for _, r := range report.Follows {
-		followsLines = append(followsLines, r.Lines...)
+	if sel.Has(lint.CheckFollows) {
+		for _, r := range report.Follows {
+			followsLines = append(followsLines, r.Lines...)
+		}
 	}
 	var deadTargets []string
-	for _, d := range report.DeadOverrides {
-		if d.Direct {
-			deadTargets = append(deadTargets, d.Override)
+	if sel.Has(lint.CheckDeadOverrides) {
+		for _, d := range report.DeadOverrides {
+			if d.Direct {
+				deadTargets = append(deadTargets, d.Override)
+			}
 		}
 	}
 
 	if len(followsLines) == 0 && len(deadTargets) == 0 {
-		if remaining := reportOnlyCount(report); remaining > 0 {
+		if remaining := reportOnlyCount(report, sel); remaining > 0 {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
 		}
@@ -328,27 +377,31 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report) int {
 	}
 
 	// Re-analyze the (possibly regenerated) lock + edited flake.nix for an
-	// honest exit code. This pass is offline (online=false): pruning a direct
-	// override cannot change the transitive findings, so those are carried
-	// forward from the pre-fix report rather than re-fetched.
-	after, err := analyzeFlake(ctx, flakeDir, false)
+	// honest exit code, under the same selection. This pass is offline
+	// (online=false): pruning a direct override cannot change the transitive
+	// findings, so those are carried forward from the pre-fix report rather
+	// than re-fetched. Each remaining-finding check is gated by the
+	// selection so a deselected category never holds the exit non-zero.
+	after, err := analyzeFlake(ctx, flakeDir, sel, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
 	}
-	if len(after.Follows) > 0 {
+	if sel.Has(lint.CheckFollows) && len(after.Follows) > 0 {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d follows opportunity group(s) remain after fix (re-run lint for detail)\n", len(after.Follows))
 		return 1
 	}
-	if n := len(after.DeadOverrides); n > 0 {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d direct dead override(s) remain after fix (re-run lint for detail)\n", n)
-		return 1
+	if sel.Has(lint.CheckDeadOverrides) {
+		if n := len(after.DeadOverrides); n > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d direct dead override(s) remain after fix (re-run lint for detail)\n", n)
+			return 1
+		}
+		if n := transitiveCount(report); n > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d transitive dead override(s) remain (fix in the upstream flake.nix, not here)\n", n)
+			return 1
+		}
 	}
-	if n := transitiveCount(report); n > 0 {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d transitive dead override(s) remain (fix in the upstream flake.nix, not here)\n", n)
-		return 1
-	}
-	if len(after.MultiVersion) > 0 {
+	if sel.Has(lint.CheckMultiVersion) && len(after.MultiVersion) > 0 {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d multi-version input(s) remain (report-only, not auto-collapsed)\n", len(after.MultiVersion))
 		return 1
 	}

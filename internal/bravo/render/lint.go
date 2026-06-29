@@ -9,64 +9,84 @@ import (
 )
 
 // LintSummary is the renderer input for `doppelgang lint`: the flake.lock
-// follows / multi-version findings.
+// follows / multi-version findings, plus the Selection of which checks to
+// render. A nil/empty Selection renders all three checks (the default and
+// the back-compatible behavior); see active.
 type LintSummary struct {
-	Report lint.Report
+	Report    lint.Report
+	Selection lint.Selection
 }
 
-// LintText writes the human-readable lint summary.
+// active reports whether check c should be rendered. An empty Selection
+// means "all checks" so callers that leave Selection unset (and the absent
+// --checks default) get every check.
+func (s LintSummary) active(c lint.Check) bool {
+	if len(s.Selection) == 0 {
+		return true
+	}
+	return s.Selection.Has(c)
+}
+
+// LintText writes the human-readable lint summary. Only the sections for
+// the checks active in s.Selection are written.
 func LintText(w io.Writer, s LintSummary) error {
-	if _, err := fmt.Fprintf(w, "── follows opportunities ──\n"); err != nil {
-		return err
-	}
-	if len(s.Report.Follows) == 0 {
-		if _, err := fmt.Fprintln(w, "(no input pins an identical source more than once)"); err != nil {
+	if s.active(lint.CheckFollows) {
+		if _, err := fmt.Fprintf(w, "── follows opportunities ──\n"); err != nil {
 			return err
 		}
+		if len(s.Report.Follows) == 0 {
+			if _, err := fmt.Fprintln(w, "(no input pins an identical source more than once)"); err != nil {
+				return err
+			}
+		}
+		for _, r := range s.Report.Follows {
+			if _, err := fmt.Fprintf(w, "%s pinned %d× — collapse onto %q:\n",
+				r.Identity, r.NodeCount, r.Canonical); err != nil {
+				return err
+			}
+			for _, line := range r.Lines {
+				if _, err := fmt.Fprintf(w, "    %s\n", line); err != nil {
+					return err
+				}
+			}
+		}
 	}
-	for _, r := range s.Report.Follows {
-		if _, err := fmt.Fprintf(w, "%s pinned %d× — collapse onto %q:\n",
-			r.Identity, r.NodeCount, r.Canonical); err != nil {
+
+	if s.active(lint.CheckMultiVersion) {
+		if _, err := fmt.Fprintf(w, "\n── multi-version inputs ──\n"); err != nil {
 			return err
 		}
-		for _, line := range r.Lines {
-			if _, err := fmt.Fprintf(w, "    %s\n", line); err != nil {
+		if len(s.Report.MultiVersion) == 0 {
+			if _, err := fmt.Fprintln(w, "(no source repository is pinned at more than one rev)"); err != nil {
+				return err
+			}
+		}
+		for _, mv := range s.Report.MultiVersion {
+			parts := make([]string, 0, len(mv.Versions))
+			for _, v := range mv.Versions {
+				parts = append(parts, fmt.Sprintf("%s via %s", shortRev(v.Rev), v.Path))
+			}
+			if _, err := fmt.Fprintf(w, "%s: %d revs (%s)\n",
+				mv.Source, len(mv.Versions), truncList(parts, 8)); err != nil {
 				return err
 			}
 		}
 	}
 
-	if _, err := fmt.Fprintf(w, "\n── multi-version inputs ──\n"); err != nil {
-		return err
-	}
-	if len(s.Report.MultiVersion) == 0 {
-		if _, err := fmt.Fprintln(w, "(no source repository is pinned at more than one rev)"); err != nil {
+	if s.active(lint.CheckDeadOverrides) {
+		if _, err := fmt.Fprintf(w, "\n── dead follows overrides ──\n"); err != nil {
 			return err
 		}
-	}
-	for _, mv := range s.Report.MultiVersion {
-		parts := make([]string, 0, len(mv.Versions))
-		for _, v := range mv.Versions {
-			parts = append(parts, fmt.Sprintf("%s via %s", shortRev(v.Rev), v.Path))
+		if len(s.Report.DeadOverrides) == 0 {
+			if _, err := fmt.Fprintln(w, "(no follows override targets a non-existent input)"); err != nil {
+				return err
+			}
 		}
-		if _, err := fmt.Fprintf(w, "%s: %d revs (%s)\n",
-			mv.Source, len(mv.Versions), truncList(parts, 8)); err != nil {
-			return err
-		}
-	}
-
-	if _, err := fmt.Fprintf(w, "\n── dead follows overrides ──\n"); err != nil {
-		return err
-	}
-	if len(s.Report.DeadOverrides) == 0 {
-		if _, err := fmt.Fprintln(w, "(no follows override targets a non-existent input)"); err != nil {
-			return err
-		}
-	}
-	for _, d := range s.Report.DeadOverrides {
-		if _, err := fmt.Fprintf(w, "%s%s: %q has no input %q (%s)\n",
-			deadVia(d), d.Override, d.Target, d.Input, deadTag(d)); err != nil {
-			return err
+		for _, d := range s.Report.DeadOverrides {
+			if _, err := fmt.Fprintf(w, "%s%s: %q has no input %q (%s)\n",
+				deadVia(d), d.Override, d.Target, d.Input, deadTag(d)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -116,31 +136,43 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Direct   bool   `json:"direct"`
 		Via      string `json:"via,omitempty"`
 	}
+	// Pointer-slice fields with omitempty so a *deselected* check is absent
+	// from the document (nil pointer omitted), while a *selected* check with
+	// no findings still renders as `[]` (non-nil pointer to an empty slice).
+	// This lets a consumer distinguish "not checked" from "checked, clean".
 	out := struct {
-		Follows       []jsonFollows `json:"followsOpportunities"`
-		MultiVersion  []jsonMulti   `json:"multiVersionInputs"`
-		DeadOverrides []jsonDead    `json:"deadOverrides"`
-	}{
-		Follows:       make([]jsonFollows, 0, len(s.Report.Follows)),
-		MultiVersion:  make([]jsonMulti, 0, len(s.Report.MultiVersion)),
-		DeadOverrides: make([]jsonDead, 0, len(s.Report.DeadOverrides)),
-	}
-	for _, r := range s.Report.Follows {
-		out.Follows = append(out.Follows, jsonFollows{
-			Identity: r.Identity, Canonical: r.Canonical, Lines: r.Lines,
-		})
-	}
-	for _, mv := range s.Report.MultiVersion {
-		jm := jsonMulti{Source: mv.Source, Versions: make([]jsonVersion, 0, len(mv.Versions))}
-		for _, v := range mv.Versions {
-			jm.Versions = append(jm.Versions, jsonVersion{Rev: v.Rev, Path: v.Path})
+		Follows       *[]jsonFollows `json:"followsOpportunities,omitempty"`
+		MultiVersion  *[]jsonMulti   `json:"multiVersionInputs,omitempty"`
+		DeadOverrides *[]jsonDead    `json:"deadOverrides,omitempty"`
+	}{}
+	if s.active(lint.CheckFollows) {
+		follows := make([]jsonFollows, 0, len(s.Report.Follows))
+		for _, r := range s.Report.Follows {
+			follows = append(follows, jsonFollows{
+				Identity: r.Identity, Canonical: r.Canonical, Lines: r.Lines,
+			})
 		}
-		out.MultiVersion = append(out.MultiVersion, jm)
+		out.Follows = &follows
 	}
-	for _, d := range s.Report.DeadOverrides {
-		out.DeadOverrides = append(out.DeadOverrides, jsonDead{
-			Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
-		})
+	if s.active(lint.CheckMultiVersion) {
+		multi := make([]jsonMulti, 0, len(s.Report.MultiVersion))
+		for _, mv := range s.Report.MultiVersion {
+			jm := jsonMulti{Source: mv.Source, Versions: make([]jsonVersion, 0, len(mv.Versions))}
+			for _, v := range mv.Versions {
+				jm.Versions = append(jm.Versions, jsonVersion{Rev: v.Rev, Path: v.Path})
+			}
+			multi = append(multi, jm)
+		}
+		out.MultiVersion = &multi
+	}
+	if s.active(lint.CheckDeadOverrides) {
+		dead := make([]jsonDead, 0, len(s.Report.DeadOverrides))
+		for _, d := range s.Report.DeadOverrides {
+			dead = append(dead, jsonDead{
+				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
+			})
+		}
+		out.DeadOverrides = &dead
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -167,8 +199,9 @@ type ndjsonTest struct {
 // points the document will contain, mirroring TAP's `1..N` plan line. It
 // is a normative record type in the tap NDJSON schema (tap-ndjson(7)): a
 // producer that knows its plan up front SHOULD emit the plan record first,
-// and the summary's plan_count MUST equal this count. lint always runs
-// exactly three checks, so it emits the plan unconditionally.
+// and the summary's plan_count MUST equal this count. lint knows its plan
+// up front — the number of *selected* checks (all three by default, fewer
+// under --checks) — so it emits the plan unconditionally.
 type ndjsonPlan struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`
@@ -214,11 +247,13 @@ type ndjsonDeadDiag struct {
 }
 
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
-// NDJSON schema: one JSON object per line. The three checks (follows
-// opportunities, multi-version inputs, dead follows overrides) are emitted
-// as top-level `test` records (ok when the check found nothing), each finding
-// becomes a nested subtest carrying a structured diagnostic, and a trailing
-// `summary` record reports the check pass/fail counts.
+// NDJSON schema: one JSON object per line. The selected checks (a subset of
+// follows opportunities, multi-version inputs, dead follows overrides; all
+// three by default) are emitted as top-level `test` records (ok when the
+// check found nothing), each finding becomes a nested subtest carrying a
+// structured diagnostic, and a trailing `summary` record reports the check
+// pass/fail counts. The plan count and summary totals reflect the number of
+// selected checks, not the fixed three.
 // Subtests do not count toward the summary per the schema. The document
 // is always valid and never bailed: lint generates records rather than
 // transforming a TAP stream, so there are no parse diagnostics.
@@ -228,7 +263,6 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 
 	follows := ndjsonTest{
 		Type:        "test",
-		N:           1,
 		Description: "follows opportunities",
 		OK:          len(s.Report.Follows) == 0,
 	}
@@ -249,7 +283,6 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 
 	multi := ndjsonTest{
 		Type:        "test",
-		N:           2,
 		Description: "multi-version inputs",
 		OK:          len(s.Report.MultiVersion) == 0,
 	}
@@ -269,7 +302,6 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 
 	dead := ndjsonTest{
 		Type:        "test",
-		N:           3,
 		Description: "dead follows overrides",
 		OK:          len(s.Report.DeadOverrides) == 0,
 	}
@@ -283,7 +315,23 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		})
 	}
 
-	checks := []ndjsonTest{follows, multi, dead}
+	// Only the selected checks become top-level test points, renumbered
+	// 1..k in canonical order so the plan count and the N fields agree with
+	// the selection (rather than the fixed three).
+	byCheck := map[lint.Check]ndjsonTest{
+		lint.CheckFollows:       follows,
+		lint.CheckMultiVersion:  multi,
+		lint.CheckDeadOverrides: dead,
+	}
+	var checks []ndjsonTest
+	for _, c := range lint.AllChecks {
+		if !s.active(c) {
+			continue
+		}
+		t := byCheck[c]
+		t.N = len(checks) + 1
+		checks = append(checks, t)
+	}
 
 	// Announce the plan up front, then the per-check test points, then the
 	// trailing summary.
