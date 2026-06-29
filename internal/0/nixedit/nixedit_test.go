@@ -568,3 +568,77 @@ func TestApplyCompoundInputsValueBails(t *testing.T) {
 		t.Errorf("err = %v, want ErrUnparseable for compound inputs value", err)
 	}
 }
+
+// pathLiteralFlake is the regression fixture for issue #15: a flake with a
+// normal `inputs` attrset (carrying a follows override) plus an `outputs`
+// body whose `let` block contains Nix path literals — an interpolated
+// absolute path and a bare absolute path. Before scoping the parse to the
+// top-level `inputs` attrset, the shallow grammar walked into this `let`
+// body and failed at its first binding's `;` (reported as the `in`
+// keyword: "Expected … but got 'i'"), which silently degraded
+// dead-override detection to nil and made --fix bail. The grammar must now
+// skip the whole outputs value and still parse the inputs region.
+const pathLiteralFlake = `{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs";
+    bats.url = "github:amarbel-llc/bats";
+    bats.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, bats }:
+    let
+      # interpolated absolute path — the construct in eng's flake.nix
+      userIdentityPath = /${builtins.getEnv "HOME"}/.config/identity.toml;
+      hasId = builtins.pathExists /etc/nix-darwin/identity.toml;
+    in {
+      x = userIdentityPath;
+      y = hasId;
+    };
+}
+`
+
+// TestOverridesPathLiteralOutputs is the read-side regression for #15:
+// nixedit.Overrides must parse a flake whose outputs `let` body carries
+// path literals and still recover the follows override declared in
+// `inputs` (rather than failing the whole parse).
+func TestOverridesPathLiteralOutputs(t *testing.T) {
+	got, err := Overrides([]byte(pathLiteralFlake))
+	if err != nil {
+		t.Fatalf("Overrides: %v (path literals in the outputs body must not defeat the parse)", err)
+	}
+	want := []string{`inputs.bats.inputs.nixpkgs.follows`}
+	if !sameSet(got, want) {
+		t.Errorf("Overrides = %v, want %v", got, want)
+	}
+}
+
+// TestApplyPathLiteralOutputs is the write-side regression for #15: --fix
+// (Apply) must splice a follows line into the `inputs` block of a flake
+// whose outputs body carries path literals, leaving those literals
+// untouched.
+func TestApplyPathLiteralOutputs(t *testing.T) {
+	const line = `inputs.bats.inputs.systems.follows = "nixpkgs"`
+	out, applied, err := Apply([]byte(pathLiteralFlake), []string{line})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied = %v, want 1", applied)
+	}
+	s := string(out)
+	// Block-form splice: leading `inputs.` stripped, landed inside the
+	// inputs attrset (before outputs).
+	if !strings.Contains(s, `bats.inputs.systems.follows = "nixpkgs";`) {
+		t.Errorf("missing spliced follows binding:\n%s", s)
+	}
+	if i, j := strings.Index(s, "systems.follows"), strings.Index(s, "outputs ="); i > j {
+		t.Errorf("follows spliced after outputs (wrong region):\n%s", s)
+	}
+	// The path literals in the outputs body must survive verbatim.
+	if !strings.Contains(s, `/${builtins.getEnv "HOME"}/.config/identity.toml`) {
+		t.Errorf("interpolated path literal was corrupted:\n%s", s)
+	}
+	if !strings.Contains(s, `builtins.pathExists /etc/nix-darwin/identity.toml`) {
+		t.Errorf("bare absolute path literal was corrupted:\n%s", s)
+	}
+}

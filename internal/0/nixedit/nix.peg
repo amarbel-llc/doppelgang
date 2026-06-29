@@ -12,8 +12,18 @@
 // while still finding the correct end of each binding's value — even
 // when a sibling binding is `outputs = { self, ... }: <large expr>`
 // containing nested braces, strings with `${}` interpolation, and
-// comments. Anything the grammar cannot parse makes Match fail, and
-// the caller falls back to print-only rather than corrupting the file.
+// comments.
+//
+// Some sibling values defeat that opaque skip — notably `outputs =
+// { … }: let a = …; … in …`, whose let-binding semicolons (or a `with
+// …;`) terminate the run early, after which the leftover does not parse
+// as a binding. Because doppelgang only ever edits the top-level
+// `inputs` attrset, the grammar does not need the rest of the file: once
+// `Binding*` has consumed `inputs`, OpaqueTail (see below) skips the
+// remainder up to the file's closing brace. Anything the grammar still
+// cannot parse — e.g. a malformed value *before* `inputs` — makes Match
+// fail, and the caller falls back to print-only rather than corrupting
+// the file.
 //
 // Modelled on amarbel-llc/langlang grammars/toml.peg: CST mode, every
 // token a named rule, spaces disabled so whitespace placement is
@@ -26,7 +36,25 @@
 
 File       <- Trivia AttrSet Trivia EOF
 
-AttrSet    <- BraceOpen Trivia Binding* BraceClose
+AttrSet    <- BraceOpen Trivia Binding* OpaqueTail BraceClose
+
+// OpaqueTail absorbs any trailing top-level content that Binding* could
+// not parse, scoping the grammar's reach to the bindings it can handle
+// (notably `inputs`) and skipping everything after. A binding whose
+// value is a `let … in …`, `with …;`, or other expression the opaque
+// Value skip cannot model defeats Binding (an inner `;` ends the value
+// early, then the leftover fails to parse as a binding). Without this
+// rule that leftover sinks the whole file to ErrUnparseable; with it,
+// Binding* simply stops and OpaqueTail consumes the remainder up to the
+// file's closing brace. doppelgang only ever edits the `inputs` attrset,
+// so once Binding* has consumed `inputs` the rest of the file never
+// needs structural parsing — keeping the grammar robust to
+// let-expressions, path literals, and other Nix it does not model.
+// Group balances any nested {}/[]/() runs so the tail stops at the
+// file's own closing brace, not a nested one. InnerText is reused (it
+// permits `;`, which a skipped `let` body needs) since to us the tail is
+// pure trivia.
+OpaqueTail <- (Group / String / Comment / InnerText)*
 
 // A binding is either `inherit ...;` or `attrpath = value;`.
 Binding    <- (Inherit / KeyVal) Trivia
