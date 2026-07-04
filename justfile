@@ -68,6 +68,15 @@ explore-lint-fix DIR: build-nix
 explore-lint-checks DIR CHECKS *ARGS: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks {{CHECKS}} {{ARGS}}; echo "exit=$?"
 
+# Run the nixpkgs-master convention repair against a flake directory — the
+# exact shape eng's update-nix cascade invokes (issue #16). Pins the
+# nixpkgs-master input in <DIR>/flake.nix to <SHA> (splices it when missing,
+# rewrites when floating), editing flake.nix only (no re-lock; the caller
+# re-locks). Reports the exit code. SHA must be a 40-hex nixpkgs revision.
+[group('explore')]
+explore-lint-nixpkgs-master DIR SHA: build-nix
+  ./result/bin/doppelgang lint --flake {{DIR}} --checks nixpkgs-master --fix --nixpkgs-master-sha {{SHA}} --format text; echo "exit=$?"
+
 # Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
 # `just fmt -- --ci` to fail if anything would change.
 fmt *ARGS:

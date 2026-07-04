@@ -17,12 +17,18 @@ type LintSummary struct {
 	Selection lint.Selection
 }
 
+// renderDefaultSelection is the empty-Selection fallback, computed once
+// (active runs several times per render, so we avoid rebuilding the map each
+// call). Read-only here — never mutated.
+var renderDefaultSelection = lint.DefaultSelection()
+
 // active reports whether check c should be rendered. An empty Selection
-// means "all checks" so callers that leave Selection unset (and the absent
-// --checks default) get every check.
+// means the DefaultChecks subset (the same fallback the absent --checks
+// default resolves to), so a caller that leaves Selection unset gets the
+// three default checks — not the opt-in nixpkgs-master convention check.
 func (s LintSummary) active(c lint.Check) bool {
 	if len(s.Selection) == 0 {
-		return true
+		return renderDefaultSelection.Has(c)
 	}
 	return s.Selection.Has(c)
 }
@@ -90,7 +96,35 @@ func LintText(w io.Writer, s LintSummary) error {
 		}
 	}
 
+	if s.active(lint.CheckNixpkgsMaster) {
+		if _, err := fmt.Fprintf(w, "\n── nixpkgs-master convention ──\n"); err != nil {
+			return err
+		}
+		if s.Report.NixpkgsMaster == nil {
+			if _, err := fmt.Fprintln(w, "(nixpkgs-master is pinned to github:NixOS/nixpkgs/<40-hex sha>)"); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintln(w, nixpkgsMasterLine(*s.Report.NixpkgsMaster)); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// nixpkgsMasterLine renders the precise diagnostic for a non-conformant
+// nixpkgs-master input, one per failure mode.
+func nixpkgsMasterLine(f lint.NixpkgsMasterFinding) string {
+	switch f.Status {
+	case lint.NixpkgsMasterMissing:
+		return "nixpkgs-master input missing: declare `nixpkgs-master.url = \"github:NixOS/nixpkgs/<40-hex sha>\"`"
+	case lint.NixpkgsMasterFloating:
+		return fmt.Sprintf("nixpkgs-master floating: %q is not pinned to a 40-hex revision (want github:NixOS/nixpkgs/<40-hex sha>)", f.URL)
+	case lint.NixpkgsMasterNonGithub:
+		return fmt.Sprintf("nixpkgs-master non-github: %q is not a github:NixOS/nixpkgs/<40-hex sha> ref", f.URL)
+	default:
+		return "nixpkgs-master: non-conformant"
+	}
 }
 
 // deadTag renders the direct/transitive tag for a dead override, including
@@ -136,14 +170,24 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Direct   bool   `json:"direct"`
 		Via      string `json:"via,omitempty"`
 	}
-	// Pointer-slice fields with omitempty so a *deselected* check is absent
-	// from the document (nil pointer omitted), while a *selected* check with
-	// no findings still renders as `[]` (non-nil pointer to an empty slice).
-	// This lets a consumer distinguish "not checked" from "checked, clean".
+	type jsonNixpkgsMaster struct {
+		// Conformant is true when the input is pinned to the convention.
+		Conformant bool `json:"conformant"`
+		// Status and URL describe the non-conformance; omitted when
+		// conformant (there is nothing to report).
+		Status string `json:"status,omitempty"`
+		URL    string `json:"url,omitempty"`
+	}
+	// Pointer fields with omitempty so a *deselected* check is absent from
+	// the document (nil pointer omitted), while a *selected* check with no
+	// findings still renders (an empty `[]` for the slice checks, or a
+	// `{"conformant":true}` object for nixpkgs-master). This lets a consumer
+	// distinguish "not checked" from "checked, clean".
 	out := struct {
-		Follows       *[]jsonFollows `json:"followsOpportunities,omitempty"`
-		MultiVersion  *[]jsonMulti   `json:"multiVersionInputs,omitempty"`
-		DeadOverrides *[]jsonDead    `json:"deadOverrides,omitempty"`
+		Follows       *[]jsonFollows     `json:"followsOpportunities,omitempty"`
+		MultiVersion  *[]jsonMulti       `json:"multiVersionInputs,omitempty"`
+		DeadOverrides *[]jsonDead        `json:"deadOverrides,omitempty"`
+		NixpkgsMaster *jsonNixpkgsMaster `json:"nixpkgsMaster,omitempty"`
 	}{}
 	if s.active(lint.CheckFollows) {
 		follows := make([]jsonFollows, 0, len(s.Report.Follows))
@@ -173,6 +217,14 @@ func LintJSON(w io.Writer, s LintSummary) error {
 			})
 		}
 		out.DeadOverrides = &dead
+	}
+	if s.active(lint.CheckNixpkgsMaster) {
+		nm := &jsonNixpkgsMaster{Conformant: s.Report.NixpkgsMaster == nil}
+		if s.Report.NixpkgsMaster != nil {
+			nm.Status = s.Report.NixpkgsMaster.Status.String()
+			nm.URL = s.Report.NixpkgsMaster.URL
+		}
+		out.NixpkgsMaster = nm
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -246,6 +298,11 @@ type ndjsonDeadDiag struct {
 	Via      string `json:"via,omitempty"`
 }
 
+type ndjsonNixpkgsMasterDiag struct {
+	Status string `json:"status"`
+	URL    string `json:"url,omitempty"`
+}
+
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
 // NDJSON schema: one JSON object per line. The selected checks (a subset of
 // follows opportunities, multi-version inputs, dead follows overrides; all
@@ -315,13 +372,29 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		})
 	}
 
+	nixpkgsMaster := ndjsonTest{
+		Type:        "test",
+		Description: "nixpkgs-master convention",
+		OK:          s.Report.NixpkgsMaster == nil,
+	}
+	if f := s.Report.NixpkgsMaster; f != nil {
+		nixpkgsMaster.Subtest = append(nixpkgsMaster.Subtest, ndjsonTest{
+			Type:        "test",
+			N:           1,
+			Description: fmt.Sprintf("nixpkgs-master %s", f.Status),
+			OK:          false,
+			Diagnostic:  ndjsonNixpkgsMasterDiag{Status: f.Status.String(), URL: f.URL},
+		})
+	}
+
 	// Only the selected checks become top-level test points, renumbered
 	// 1..k in canonical order so the plan count and the N fields agree with
-	// the selection (rather than the fixed three).
+	// the selection (rather than the fixed set).
 	byCheck := map[lint.Check]ndjsonTest{
 		lint.CheckFollows:       follows,
 		lint.CheckMultiVersion:  multi,
 		lint.CheckDeadOverrides: dead,
+		lint.CheckNixpkgsMaster: nixpkgsMaster,
 	}
 	var checks []ndjsonTest
 	for _, c := range lint.AllChecks {

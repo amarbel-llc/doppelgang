@@ -22,6 +22,12 @@ type Report struct {
 	// from the lock alone by Analyze), these require the override bindings
 	// parsed from a flake.nix; see DeadOverrides. Analyze leaves this nil.
 	DeadOverrides []DeadOverride
+	// NixpkgsMaster is non-nil when the flake's top-level `nixpkgs-master`
+	// input does not conform to the SHA-pinned convention
+	// (github:NixOS/nixpkgs/<40-hex>). It is computed from flake.nix alone
+	// (not the lock); a conformant flake — and Analyze, which never runs
+	// this check — leaves it nil. See CheckNixpkgsMaster.
+	NixpkgsMaster *NixpkgsMasterFinding
 }
 
 // FollowsRec recommends collapsing a set of nodes that pin an identical

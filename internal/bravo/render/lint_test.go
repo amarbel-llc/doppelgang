@@ -310,6 +310,115 @@ func TestLintNDJSONSelectionPlanCount(t *testing.T) {
 	}
 }
 
+// TestLintNixpkgsMasterRendering covers the opt-in nixpkgs-master check in
+// all three formats: a non-conformant (floating) input is named with its
+// url in text, carries a structured diagnostic in NDJSON, and reports
+// conformant:false in JSON. The check must be explicitly selected (it is not
+// a default check).
+func TestLintNixpkgsMasterRendering(t *testing.T) {
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	rep := lint.Report{
+		NixpkgsMaster: &lint.NixpkgsMasterFinding{
+			Status: lint.NixpkgsMasterFloating,
+			URL:    "github:NixOS/nixpkgs",
+		},
+	}
+	sum := LintSummary{Report: rep, Selection: sel}
+
+	var text bytes.Buffer
+	if err := LintText(&text, sum); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	ts := text.String()
+	if !strings.Contains(ts, "── nixpkgs-master convention ──") {
+		t.Errorf("missing nixpkgs-master section header:\n%s", ts)
+	}
+	if !strings.Contains(ts, "nixpkgs-master floating") || !strings.Contains(ts, "github:NixOS/nixpkgs") {
+		t.Errorf("floating diagnostic missing/wrong:\n%s", ts)
+	}
+	// The three default sections must NOT render (nixpkgs-master-only sel).
+	if strings.Contains(ts, "follows opportunities") || strings.Contains(ts, "dead follows overrides") {
+		t.Errorf("deselected default sections rendered:\n%s", ts)
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, sum); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, nd.Bytes())
+	// plan + 1 check + summary = 3 records.
+	if len(recs) != 3 {
+		t.Fatalf("want 3 records (plan + nixpkgs-master + summary), got %d:\n%s", len(recs), nd.String())
+	}
+	plan, check, summary := recs[0], recs[1], recs[2]
+	if plan.Type != "plan" || plan.Count != 1 {
+		t.Errorf("plan count must be 1 for a single selected check, got %+v", plan)
+	}
+	if check.Description != "nixpkgs-master convention" || check.OK {
+		t.Errorf("nixpkgs-master check with a finding must not be ok: %+v", check)
+	}
+	if len(check.Subtest) != 1 {
+		t.Fatalf("want 1 nixpkgs-master subtest, got %d", len(check.Subtest))
+	}
+	var nmd struct {
+		Status string `json:"status"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(check.Subtest[0].Diagnostic, &nmd); err != nil {
+		t.Fatalf("nixpkgs-master subtest diagnostic is not an object: %v", err)
+	}
+	if nmd.Status != "floating" || nmd.URL != "github:NixOS/nixpkgs" {
+		t.Errorf("nixpkgs-master diagnostic wrong: %+v", nmd)
+	}
+	if summary.Total != 1 || summary.Failed != 1 || summary.PlanCount != 1 {
+		t.Errorf("summary must reflect 1 selected failing check, got %+v", summary)
+	}
+
+	var js bytes.Buffer
+	if err := LintJSON(&js, sum); err != nil {
+		t.Fatalf("LintJSON: %v", err)
+	}
+	jsStr := js.String()
+	if !strings.Contains(jsStr, `"nixpkgsMaster"`) || !strings.Contains(jsStr, `"conformant": false`) {
+		t.Errorf("JSON must carry a non-conformant nixpkgsMaster object:\n%s", jsStr)
+	}
+	if strings.Contains(jsStr, "followsOpportunities") {
+		t.Errorf("deselected default checks must be absent from JSON:\n%s", jsStr)
+	}
+}
+
+// TestLintNixpkgsMasterConformantRendering confirms a conformant flake (nil
+// finding) still renders a positive text line and an ok NDJSON check when the
+// check is selected — so "checked, clean" is distinguishable from "not
+// checked".
+func TestLintNixpkgsMasterConformantRendering(t *testing.T) {
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	sum := LintSummary{Report: lint.Report{}, Selection: sel}
+
+	var text bytes.Buffer
+	if err := LintText(&text, sum); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	if !strings.Contains(text.String(), "(nixpkgs-master is pinned to github:NixOS/nixpkgs/") {
+		t.Errorf("conformant nixpkgs-master must render a positive line:\n%s", text.String())
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, sum); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, nd.Bytes())
+	if len(recs) != 3 || !recs[1].OK || recs[2].Passed != 1 {
+		t.Errorf("conformant check must be ok and pass:\n%s", nd.String())
+	}
+}
+
 // TestLintJSONSelectionOmitsDeselected confirms the json format omits a
 // deselected check's key entirely (so a consumer can tell "not checked"
 // from "checked, clean") while keeping selected keys.

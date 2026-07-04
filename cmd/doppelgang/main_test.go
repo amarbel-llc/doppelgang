@@ -163,6 +163,91 @@ func TestReportOnlyCountRespectsSelection(t *testing.T) {
 	}
 }
 
+// TestAnalyzeFlakeDetectsMissingNixpkgsMaster: a flake.nix declaring no
+// nixpkgs-master input yields a Missing finding under the nixpkgs-master
+// selection, and gates the exit.
+func TestAnalyzeFlakeDetectsMissingNixpkgsMaster(t *testing.T) {
+	dir := writeFlake(t, `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+  };
+  outputs = { self, igloo }: { };
+}
+`, depLock)
+
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	if err != nil {
+		t.Fatalf("analyzeFlake: %v", err)
+	}
+	if rep.NixpkgsMaster == nil || rep.NixpkgsMaster.Status != lint.NixpkgsMasterMissing {
+		t.Fatalf("want a Missing nixpkgs-master finding, got %+v", rep.NixpkgsMaster)
+	}
+	if !reportHasFindings(rep, sel) {
+		t.Errorf("reportHasFindings = false, want true (missing nixpkgs-master)")
+	}
+}
+
+// TestAnalyzeFlakeNixpkgsMasterConformant: a flake pinned to the convention
+// yields no finding and does not gate the exit.
+func TestAnalyzeFlakeNixpkgsMasterConformant(t *testing.T) {
+	dir := writeFlake(t, `{
+  inputs = {
+    nixpkgs-master.url = "github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f";
+  };
+  outputs = { self }: { };
+}
+`, depLock)
+
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	if err != nil {
+		t.Fatalf("analyzeFlake: %v", err)
+	}
+	if rep.NixpkgsMaster != nil {
+		t.Errorf("conformant flake flagged: %+v", rep.NixpkgsMaster)
+	}
+	if reportHasFindings(rep, sel) {
+		t.Errorf("reportHasFindings = true, want false (conformant)")
+	}
+}
+
+// TestAnalyzeFlakeNixpkgsMasterWithoutLock is the self-onboarding regression:
+// `--checks nixpkgs-master` must work on a freshly-cloned repo that has a
+// flake.nix but no flake.lock yet — the lock is not loaded when only the
+// nixpkgs-master check is selected.
+func TestAnalyzeFlakeNixpkgsMasterWithoutLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "flake.nix"), []byte(`{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+  };
+  outputs = { self, igloo }: { };
+}
+`), 0o644); err != nil {
+		t.Fatalf("write flake.nix: %v", err)
+	}
+	// Deliberately no flake.lock in dir.
+
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	if err != nil {
+		t.Fatalf("analyzeFlake must not require a lock for the nixpkgs-master check: %v", err)
+	}
+	if rep.NixpkgsMaster == nil || rep.NixpkgsMaster.Status != lint.NixpkgsMasterMissing {
+		t.Errorf("want a Missing finding for the lockless flake, got %+v", rep.NixpkgsMaster)
+	}
+}
+
 func TestResolveLintFormatExplicit(t *testing.T) {
 	for _, f := range []string{"text", "json", "ndjson"} {
 		got, err := resolveLintFormat(f, os.Stdout)

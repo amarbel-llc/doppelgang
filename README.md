@@ -11,7 +11,8 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
 doppelgang lint [--flake .] [--format auto|text|json|ndjson]
-                [--checks follows,multi-version,dead-overrides] [--online] [--fix]
+                [--checks follows,multi-version,dead-overrides,nixpkgs-master]
+                [--online] [--fix] [--nixpkgs-master-sha <40-hex>]
 doppelgang version
 ```
 
@@ -35,8 +36,9 @@ In `--scope build` (the default), `--derivation` is passed to `why-depends`
 so build-time-only paths like setup hooks (`install-shell-files`,
 `goBuildHook`) are reachable. `--scope runtime` traces output paths only.
 
-`lint` reads `<flake>/flake.lock` (and `<flake>/flake.nix`) and surfaces three
-classes of reducible input duplication and rot:
+`lint` reads `<flake>/flake.lock` (and `<flake>/flake.nix`) and surfaces
+classes of reducible input duplication and rot, plus (opt-in) one convention
+check:
 
 - **follows opportunities** — nodes that pin a byte-identical source (same
   `narHash`/`rev`) more than once. For each, `lint` prints the concrete
@@ -49,6 +51,16 @@ classes of reducible input duplication and rot:
   an override for a non-existent input"). A *direct* dead override lives in the
   linted `flake.nix` and is fixable here; a *transitive* one lives in an
   upstream flake's `flake.nix` and is report-only (the fix lands upstream).
+- **nixpkgs-master convention** (opt-in; not a default check) — verifies
+  `<flake>/flake.nix` declares a top-level `nixpkgs-master` input pinned to
+  `github:NixOS/nixpkgs/<40-hex sha>`, the shape eng's update-nix cascade
+  requires. It fails on a missing input, a floating ref (no rev, or a
+  branch/tag name), or a non-github shape. `--fix` pins it (see below). This
+  encodes an amarbel-llc-fleet policy rather than a universal finding, so it
+  is excluded from the default checks and only runs when selected via
+  `--checks nixpkgs-master` (or the `all` alias). Detection reads `flake.nix`
+  alone — no `flake.lock` needed — so it works on a freshly-cloned repo that
+  is not yet locked. See `docs/features/0005-lint-nixpkgs-master-convention.md`.
 
 The follows / multi-version analyses are entirely offline. Dead-override
 detection reads `<flake>/flake.nix` too (direct overrides are not recorded in
@@ -76,9 +88,20 @@ finding (or any residual auto-fixable one) remains afterward. If `flake.nix`
 can't be parsed or has no editable `inputs` attrset, `--fix` prints the changes
 to make by hand and exits non-zero rather than risk corrupting the file.
 
+When the `nixpkgs-master` check is selected, `--fix` pins the input to
+`--nixpkgs-master-sha <40-hex>` (required in that case; `--fix` without it
+exits `2`): the `nixpkgs-master.url = "github:NixOS/nixpkgs/<sha>";` binding is
+spliced into the `inputs` attrset when the input is missing, or its url is
+rewritten in place when it floats — same byte-preserving PEG surgery as the
+follows/dead-override edits. Unlike those, the nixpkgs-master pin edits
+`flake.nix` only and does **not** re-lock: materializing the new/updated input
+into `flake.lock` is left to the caller (eng's cascade runs `nix flake update`
+immediately after). `flake.nix` is still staged.
+
 `--checks` restricts the run to a comma-separated subset of `follows`,
-`multi-version`, and `dead-overrides` (default: all three; `all` is an alias;
-an unknown name exits `2`). The selection gates **everything**: only the chosen
+`multi-version`, `dead-overrides`, and `nixpkgs-master` (default: the first
+three; `all` selects every check including the opt-in `nixpkgs-master`; an
+unknown name exits `2`). The selection gates **everything**: only the chosen
 checks are rendered (in every `--format`), counted toward the non-zero exit, and
 auto-fixed by `--fix`. This lets a caller gate on a chosen subset — e.g. a flake
 that intentionally pins inputs at multiple revisions can run
@@ -99,8 +122,9 @@ without a flag.
 
 The leading `{"type":"plan","count":N}` record is the schema's normative plan
 record: lint knows its plan up front — `N` is the number of *selected* checks
-(three by default, fewer under `--checks`) — so it announces them as the first
-record, and the summary's `plan_count` matches that count.
+(three by default; fewer under a `--checks` subset, or four when `nixpkgs-master`
+is added) — so it announces them as the first record, and the summary's
+`plan_count` matches that count.
 
 `lint` exits `1` when any *selected* check reports a finding, so it can run in
 CI as a gate against new input duplication and rot (over the chosen subset).

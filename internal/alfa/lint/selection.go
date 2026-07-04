@@ -14,16 +14,28 @@ const (
 	CheckFollows       Check = "follows"
 	CheckMultiVersion  Check = "multi-version"
 	CheckDeadOverrides Check = "dead-overrides"
+	CheckNixpkgsMaster Check = "nixpkgs-master"
 )
 
 // AllChecks is the canonical order of every check. Renderers iterate this
 // and filter by the active Selection so output order is stable regardless
 // of which subset is selected.
-var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides}
+var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, CheckNixpkgsMaster}
+
+// DefaultChecks is the subset selected when `--checks` is absent — the three
+// flake.lock/flake.nix analyses that need no external parameter. The
+// nixpkgs-master convention check is deliberately excluded from the default:
+// it encodes an amarbel-llc-fleet policy (a specific input pinned a specific
+// way) rather than a universal reducible-duplication finding, so a plain
+// `lint` on an arbitrary flake must not fail for lacking it. It is opt-in via
+// `--checks nixpkgs-master` (or the `all` alias). Keeping the default at three
+// also preserves the pre-existing exit-code, output, and NDJSON plan-count
+// behavior for every existing consumer.
+var DefaultChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides}
 
 // Selection is the set of enabled checks. The zero value (nil) enables
 // none; callers building one from the CLI should use ParseSelection (which
-// treats an absent --checks as all) or AllSelection.
+// treats an absent --checks as the default subset) or AllSelection.
 type Selection map[Check]bool
 
 // Has reports whether c is enabled in the selection.
@@ -40,25 +52,33 @@ func (s Selection) Count() int {
 	return n
 }
 
-// AllSelection returns a Selection with every check enabled — the default
-// when `--checks` is absent.
-func AllSelection() Selection {
-	s := make(Selection, len(AllChecks))
-	for _, c := range AllChecks {
+// AllSelection returns a Selection with every check enabled — the target of
+// the `all` alias.
+func AllSelection() Selection { return selectionFromChecks(AllChecks) }
+
+// DefaultSelection returns the Selection used when `--checks` is absent: the
+// DefaultChecks subset (see its doc for why nixpkgs-master is opt-in).
+func DefaultSelection() Selection { return selectionFromChecks(DefaultChecks) }
+
+// selectionFromChecks builds a Selection enabling exactly the given checks.
+func selectionFromChecks(checks []Check) Selection {
+	s := make(Selection, len(checks))
+	for _, c := range checks {
 		s[c] = true
 	}
 	return s
 }
 
 // ParseSelection parses a comma-separated `--checks` value into a
-// Selection. An empty string selects every check (the default, so behavior
-// is unchanged when the flag is absent). "all" is an alias for every check
-// and may appear alongside other names. Whitespace around names is
-// tolerated and empty fields (e.g. a trailing comma) are ignored. An
-// unrecognized name yields an error naming the valid checks.
+// Selection. An empty string selects the DefaultChecks subset (so behavior
+// is unchanged when the flag is absent). "all" is an alias for every check —
+// including the opt-in nixpkgs-master convention check — and may appear
+// alongside other names. Whitespace around names is tolerated and empty
+// fields (e.g. a trailing comma) are ignored. An unrecognized name yields an
+// error naming the valid checks.
 func ParseSelection(raw string) (Selection, error) {
 	if strings.TrimSpace(raw) == "" {
-		return AllSelection(), nil
+		return DefaultSelection(), nil
 	}
 	sel := make(Selection, len(AllChecks))
 	for _, field := range strings.Split(raw, ",") {

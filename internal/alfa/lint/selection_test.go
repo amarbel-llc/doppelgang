@@ -2,8 +2,33 @@ package lint
 
 import "testing"
 
-func TestParseSelectionDefaultIsAll(t *testing.T) {
-	for _, raw := range []string{"", "   ", "all", " all "} {
+// TestParseSelectionDefaultIsDefaultChecks: an absent --checks selects the
+// DefaultChecks subset (the three lock/flake analyses), NOT the opt-in
+// nixpkgs-master convention check.
+func TestParseSelectionDefaultIsDefaultChecks(t *testing.T) {
+	for _, raw := range []string{"", "   "} {
+		sel, err := ParseSelection(raw)
+		if err != nil {
+			t.Fatalf("ParseSelection(%q): %v", raw, err)
+		}
+		if got := sel.Count(); got != len(DefaultChecks) {
+			t.Errorf("ParseSelection(%q).Count() = %d, want %d", raw, got, len(DefaultChecks))
+		}
+		for _, c := range DefaultChecks {
+			if !sel.Has(c) {
+				t.Errorf("ParseSelection(%q) missing default check %q", raw, c)
+			}
+		}
+		if sel.Has(CheckNixpkgsMaster) {
+			t.Errorf("ParseSelection(%q) must not select the opt-in nixpkgs-master check", raw)
+		}
+	}
+}
+
+// TestParseSelectionAllAliasIsEveryCheck: the `all` alias selects every
+// check, including the opt-in nixpkgs-master convention check.
+func TestParseSelectionAllAliasIsEveryCheck(t *testing.T) {
+	for _, raw := range []string{"all", " all "} {
 		sel, err := ParseSelection(raw)
 		if err != nil {
 			t.Fatalf("ParseSelection(%q): %v", raw, err)
@@ -15,6 +40,9 @@ func TestParseSelectionDefaultIsAll(t *testing.T) {
 			if !sel.Has(c) {
 				t.Errorf("ParseSelection(%q) missing %q", raw, c)
 			}
+		}
+		if !sel.Has(CheckNixpkgsMaster) {
+			t.Errorf("ParseSelection(%q) 'all' must include nixpkgs-master", raw)
 		}
 	}
 }

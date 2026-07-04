@@ -64,7 +64,8 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson]\n")
-	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides] [--online] [--fix]\n")
+	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides,nixpkgs-master]\n")
+	fmt.Fprintf(os.Stderr, "                  [--online] [--fix] [--nixpkgs-master-sha <40-hex>]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
@@ -72,8 +73,16 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "flags dead `follows` overrides that target an input the dependency no longer\n")
 	fmt.Fprintf(os.Stderr, "declares. Exits 1 when any selected check reports a finding, so it can serve as\n")
 	fmt.Fprintf(os.Stderr, "a CI gate. --checks restricts to a comma-separated subset (follows,\n")
-	fmt.Fprintf(os.Stderr, "multi-version, dead-overrides; default all, 'all' is an alias) — it gates the\n")
-	fmt.Fprintf(os.Stderr, "exit code, the output, and --fix alike.\n")
+	fmt.Fprintf(os.Stderr, "multi-version, dead-overrides, nixpkgs-master; default is the first three,\n")
+	fmt.Fprintf(os.Stderr, "'all' selects every check including nixpkgs-master) — it gates the exit code, the\n")
+	fmt.Fprintf(os.Stderr, "output, and --fix alike.\n")
+	fmt.Fprintf(os.Stderr, "The nixpkgs-master check (opt-in) verifies flake.nix declares a nixpkgs-master\n")
+	fmt.Fprintf(os.Stderr, "input pinned to github:NixOS/nixpkgs/<40-hex>, failing on a missing input, a\n")
+	fmt.Fprintf(os.Stderr, "floating ref, or a non-github shape. --fix pins it to --nixpkgs-master-sha (which\n")
+	fmt.Fprintf(os.Stderr, "is required with --fix when the check is selected): the url is spliced in when the\n")
+	fmt.Fprintf(os.Stderr, "input is missing, or rewritten when it floats. This repair edits flake.nix only\n")
+	fmt.Fprintf(os.Stderr, "and does NOT re-lock — materializing the input into flake.lock is left to the\n")
+	fmt.Fprintf(os.Stderr, "caller (e.g. a following `nix flake update`).\n")
 	fmt.Fprintf(os.Stderr, "--format=auto (the default) emits text on a TTY and tap NDJSON otherwise.\n")
 	fmt.Fprintf(os.Stderr, "--online additionally detects transitive dead overrides (declared in an upstream\n")
 	fmt.Fprintf(os.Stderr, "flake.nix) by fetching those files — read-only and best-effort. --fix splices the\n")
@@ -147,12 +156,28 @@ func lintMain(ctx context.Context, args []string) int {
 	checks := fs.String("checks", "", "comma-separated subset of checks to gate on: follows, multi-version, dead-overrides (default all; 'all' is an alias)")
 	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
 	online := fs.Bool("online", false, "additionally detect transitive dead overrides by fetching upstream flake.nix files (read-only, best-effort; implied by --fix)")
+	nixpkgsMasterSHA := fs.String("nixpkgs-master-sha", "", "40-hex nixpkgs revision to pin the nixpkgs-master input to; required with --fix when the nixpkgs-master check is selected")
 	_ = fs.Parse(args)
 
 	sel, err := lint.ParseSelection(*checks)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 2
+	}
+
+	// Repairing the nixpkgs-master convention needs a target revision. Fail
+	// loudly and early when --fix selects the check without a valid sha,
+	// rather than analyzing first and discovering mid-repair we cannot fix
+	// it. Check mode (no --fix) never needs the sha.
+	if *fix && sel.Has(lint.CheckNixpkgsMaster) {
+		if *nixpkgsMasterSHA == "" {
+			fmt.Fprintf(os.Stderr, "doppelgang lint: --fix with the nixpkgs-master check requires --nixpkgs-master-sha <40-hex sha>\n")
+			return 2
+		}
+		if !lint.ValidNixpkgsSHA(*nixpkgsMasterSHA) {
+			fmt.Fprintf(os.Stderr, "doppelgang lint: --nixpkgs-master-sha must be a 40-char lowercase-hex nixpkgs revision, got %q\n", *nixpkgsMasterSHA)
+			return 2
+		}
 	}
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
@@ -187,7 +212,7 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 
 	if *fix {
-		return lintFix(ctx, *flakeDir, report, sel)
+		return lintFix(ctx, *flakeDir, report, sel, *nixpkgsMasterSHA)
 	}
 
 	// Exit non-zero when a *selected* check reports a finding so `lint` can
@@ -217,18 +242,50 @@ func lintMain(ctx context.Context, args []string) int {
 // those files. Any fetch failure is a silent no-op, so transitive findings
 // are present only when reachable.
 func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool) (lint.Report, error) {
-	lock, err := flakelock.Load(flakeDir)
-	if err != nil {
-		return lint.Report{}, err
-	}
-	report := lint.Analyze(lock)
-	if sel.Has(lint.CheckDeadOverrides) {
-		report.DeadOverrides = directDeadOverrides(flakeDir, lock)
-		if online {
-			report.DeadOverrides = append(report.DeadOverrides, transitiveDeadOverrides(ctx, lock)...)
+	var report lint.Report
+	// The follows, multi-version, and dead-overrides checks all need the
+	// lock; the nixpkgs-master convention check reads flake.nix alone. Load
+	// the lock only when a lock-dependent check is selected, so
+	// `--checks nixpkgs-master` works on a freshly-cloned repo that has no
+	// flake.lock yet (the self-onboarding case).
+	if sel.Has(lint.CheckFollows) || sel.Has(lint.CheckMultiVersion) || sel.Has(lint.CheckDeadOverrides) {
+		lock, err := flakelock.Load(flakeDir)
+		if err != nil {
+			return lint.Report{}, err
+		}
+		report = lint.Analyze(lock)
+		if sel.Has(lint.CheckDeadOverrides) {
+			report.DeadOverrides = directDeadOverrides(flakeDir, lock)
+			if online {
+				report.DeadOverrides = append(report.DeadOverrides, transitiveDeadOverrides(ctx, lock)...)
+			}
 		}
 	}
+	if sel.Has(lint.CheckNixpkgsMaster) {
+		report.NixpkgsMaster = nixpkgsMasterFinding(flakeDir)
+	}
 	return report, nil
+}
+
+// nixpkgsMasterFinding reads <flakeDir>/flake.nix and classifies its
+// top-level `nixpkgs-master` input against the SHA-pinned convention,
+// returning a finding (or nil when conformant). A read failure yields nil
+// (an unbuilt/exotic checkout with no flake.nix to inspect is not the
+// convention's concern); an unparseable flake.nix yields nil with a stderr
+// note. A parseable flake.nix that simply lacks the input yields a Missing
+// finding — the issue's "input missing entirely" fail case. Detection is
+// fully offline.
+func nixpkgsMasterFinding(flakeDir string) *lint.NixpkgsMasterFinding {
+	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	if err != nil {
+		return nil
+	}
+	url, present, err := nixedit.InputURL(src, "nixpkgs-master")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: flake.nix not parseable; skipping nixpkgs-master convention check (%v)\n", err)
+		return nil
+	}
+	return lint.ClassifyNixpkgsMaster(url, present)
 }
 
 // directDeadOverrides reads <flakeDir>/flake.nix and returns the dead follows
@@ -259,6 +316,9 @@ func reportHasFindings(r lint.Report, sel lint.Selection) bool {
 		return true
 	}
 	if sel.Has(lint.CheckDeadOverrides) && len(r.DeadOverrides) > 0 {
+		return true
+	}
+	if sel.Has(lint.CheckNixpkgsMaster) && r.NixpkgsMaster != nil {
 		return true
 	}
 	return false
@@ -296,9 +356,21 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 //
 // The selection gates which classes are auto-fixed: follows lines only when
 // the follows check is selected, direct dead overrides only when the
-// dead-overrides check is selected. A deselected check is neither applied
-// nor counted toward the report-only accounting or the exit code.
-func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection) int {
+// dead-overrides check is selected, and the nixpkgs-master pin only when the
+// nixpkgs-master check is selected. A deselected check is neither applied nor
+// counted toward the report-only accounting or the exit code.
+//
+// Locking policy: the follows-collapse and dead-override prunes are
+// re-locked (`nix flake lock`) here because they rewrite the lock graph the
+// finding was derived from. The nixpkgs-master pin is NOT re-locked by this
+// tool — it edits flake.nix only and leaves materializing the new/updated
+// input into flake.lock to the caller. eng's update-nix cascade runs
+// `nix flake update` immediately after this repair, so a standalone
+// nixpkgs-master fix would otherwise force a redundant (and, for a freshly
+// added input, network-fetching) re-lock. When a nixpkgs-master edit rides
+// alongside a follows/dead edit, the shared re-lock those require will pick
+// it up as a side effect. flake.nix is always staged regardless.
+func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string) int {
 	var followsLines []string
 	if sel.Has(lint.CheckFollows) {
 		for _, r := range report.Follows {
@@ -313,8 +385,11 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			}
 		}
 	}
+	// The upfront validation in lintMain guarantees a valid sha here whenever
+	// the nixpkgs-master check is selected under --fix.
+	fixNixpkgsMaster := sel.Has(lint.CheckNixpkgsMaster) && report.NixpkgsMaster != nil
 
-	if len(followsLines) == 0 && len(deadTargets) == 0 {
+	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster {
 		if remaining := reportOnlyCount(report, sel); remaining > 0 {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
@@ -349,8 +424,24 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			return 1
 		}
 	}
+	var nixpkgsMasterURL string
+	nixpkgsMasterChanged := false
+	if fixNixpkgsMaster {
+		nixpkgsMasterURL = lint.NixpkgsMasterURL(nixpkgsMasterSHA)
+		out, nixpkgsMasterChanged, err = nixedit.SetInputURL(out, "nixpkgs-master", nixpkgsMasterURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not pin nixpkgs-master in %s automatically (%v).\n"+
+				"Set `nixpkgs-master.url = %q` by hand.\n", nixPath, err, nixpkgsMasterURL)
+			return 1
+		}
+	}
 
-	if len(appliedFollows) == 0 && len(removed) == 0 {
+	// Follows and dead-override edits rewrite the lock graph, so they trigger
+	// a re-lock below; the nixpkgs-master pin does not (its lock is left to
+	// the caller — see the function doc).
+	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
+
+	if !lockAffecting && !nixpkgsMasterChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
 	} else {
 		if err := os.WriteFile(nixPath, out, 0o644); err != nil {
@@ -369,9 +460,17 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 				fmt.Fprintf(os.Stderr, "    %s\n", l)
 			}
 		}
-		if err := relock(flakeDir); err != nil {
-			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-lock failed: %v\n", err)
-			return 1
+		if nixpkgsMasterChanged {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pinned nixpkgs-master in %s to %s\n", nixPath, nixpkgsMasterURL)
+		}
+		// Re-lock only for lock-affecting edits. A nixpkgs-master-only fix
+		// edits flake.nix and stages it, leaving lock materialization to the
+		// caller (eng's cascade runs `nix flake update` next).
+		if lockAffecting {
+			if err := relock(flakeDir); err != nil {
+				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-lock failed: %v\n", err)
+				return 1
+			}
 		}
 		stageFixedFiles(flakeDir)
 	}
@@ -405,6 +504,10 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d multi-version input(s) remain (report-only, not auto-collapsed)\n", len(after.MultiVersion))
 		return 1
 	}
+	if sel.Has(lint.CheckNixpkgsMaster) && after.NixpkgsMaster != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nixpkgs-master still non-conformant after fix (%s); re-run lint for detail\n", after.NixpkgsMaster.Status)
+		return 1
+	}
 	return 0
 }
 
@@ -430,16 +533,24 @@ func relock(flakeDir string) error {
 	return cmd.Run()
 }
 
-// stageFixedFiles runs `git add flake.nix flake.lock` in flakeDir so the
+// stageFixedFiles runs `git add` on the touched files in flakeDir so the
 // repair self-stages, composing with a `nix fmt` / pre-commit --staged
-// repair flow (per the conformist/dewey repair convention). A failure
-// here (e.g. not a git repo) is non-fatal: the edits are already written.
+// repair flow (per the conformist/dewey repair convention). flake.lock is
+// staged only when it exists, because the nixpkgs-master pin edits flake.nix
+// alone without re-locking — a bad pathspec would make `git add` fail
+// atomically and leave flake.nix unstaged too. A failure here (e.g. not a
+// git repo) is non-fatal: the edits are already written.
 func stageFixedFiles(flakeDir string) {
-	cmd := exec.Command("git", "-C", flakeDir, "add", "flake.nix", "flake.lock")
+	paths := []string{"flake.nix"}
+	if _, err := os.Stat(filepath.Join(flakeDir, "flake.lock")); err == nil {
+		paths = append(paths, "flake.lock")
+	}
+	args := append([]string{"-C", flakeDir, "add"}, paths...)
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not stage flake.nix/flake.lock (%v); stage them yourself\n", err)
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not stage %v (%v); stage them yourself\n", paths, err)
 	}
 }
 
