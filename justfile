@@ -1,39 +1,76 @@
-# Build, format, test, self-lint
-default: build test lint
+default: lint build test
 
-# Build via nix only — there is no `build-go` recipe. The amarbel-llc/nixpkgs
-# fork's buildGoApplication overlay burns the version + commit into the
-# binary via -ldflags, which a raw `go build` would not. Always use this.
-build: build-nix
+lint: lint-fmt lint-worktree lint-flake
 
-build-nix:
-  nix build --show-trace
+build: build-gomod2nix build-nix
 
-# Format + go test
-test: fmt test-go
+test: test-go
 
-# Run go test via the flake's checks output so the suite executes in a
-# sandboxed nix build. The check derivation is defined in flake.nix as
-# checks.<system>.go-test.
-test-go:
-  nix flake check --show-trace
+codemod: codemod-fmt
 
-# Fast per-package `go test` for the agent TDD dev-loop. Runs in the devshell
-# (seconds, sees untracked files) rather than the nix sandbox, so it is the
-# loop to iterate against; the authoritative sandboxed run remains `test-go`
-# (nix flake check), which the merge pre-merge hook (`just`) runs.
-# Usage: just test-go-pkg internal/alfa/lint
-[group('debug')]
-test-go-pkg PKG:
-  go test ./{{PKG}}/...
+clean: clean-build
+
+# Read-only formatting + the eng presets' file-based linters, via the sandboxed
+# checks.formatting derivation. Does NOT modify files — the modifying
+# counterpart is `codemod-fmt`.
+[group('lint')]
+lint-fmt:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+  nix build ".#checks.${system}.formatting" --no-link --print-build-logs
+
+# Impure eng checks (git remotes, sweatfile, agents-md) against the working
+# tree; conformist comes from the devShell PATH.
+[group('lint')]
+lint-worktree:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
+  conformist check --config-file "$cfg" --tree-root .
 
 # Self-consume: run `doppelgang lint` against this repo's own flake.lock.
 # Surfaces follows opportunities and multi-version inputs in our own
 # inputs. Recipe (and `just`) fails when lint reports findings.
-lint: lint-nix
-
-lint-nix: build-nix
+[group('lint')]
+lint-flake: build-nix
   ./result/bin/doppelgang lint
+
+# Build the doppelgang binary via nix. The amarbel-llc/nixpkgs fork's
+# buildGoApplication overlay burns the version + commit into the binary via
+# -ldflags, which a raw `go build` would not. Always use this.
+[group('build')]
+build-nix:
+  nix build --show-trace
+
+# Run go test via the flake's checks output so the suite executes in a
+# sandboxed nix build (checks.<system>.go-test in flake.nix).
+[group('test')]
+test-go:
+  nix flake check --show-trace
+
+# Fast per-package `go test` for the agent TDD dev-loop. Runs in the devshell
+# (seconds, sees untracked files) rather than the nix sandbox. The
+# authoritative sandboxed run is `test-go` (`nix flake check`).
+# Usage: just debug-go-test-pkg internal/alfa/lint
+[group('debug')]
+debug-go-test-pkg PKG:
+  go test ./{{PKG}}/...
+
+# Format the tree in place (repair mode) via `nix fmt`.
+[group('codemod')]
+codemod-fmt:
+  nix fmt
+
+# Regenerate gomod2nix.toml after go.mod / go.sum changes.
+[group('build')]
+build-gomod2nix:
+  gomod2nix
+
+# Remove build out-links.
+[group('clean')]
+clean-build:
+  rm -rf result result-*
 
 # Run `doppelgang lint --flake <DIR>` against an arbitrary flake
 # directory. Used for ad-hoc validation of lint output against external
@@ -77,15 +114,6 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 explore-lint-nixpkgs-master DIR SHA: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks nixpkgs-master --fix --nixpkgs-master-sha {{SHA}} --format text; echo "exit=$?"
 
-# Format the tree via treefmt (config: treefmt.nix). Forwards args, e.g.
-# `just fmt -- --ci` to fail if anything would change.
-fmt *ARGS:
-  nix fmt -- {{ARGS}}
-
-# Regenerate gomod2nix.toml after go.mod / go.sum changes
-gomod2nix:
-  gomod2nix
-
 # Tag a doppelgang release. The "v" prefix is added for you, so pass the
 # semver without it. Usage: just tag 0.1.0 "feat: initial release"
 tag version message:
@@ -103,23 +131,23 @@ tag version message:
     gum log --level info "Pushed $tag"
     git tag -v "$tag"
 
-# Sed-rewrite doppelgangVersion in flake.nix to the given semver. The
+# Sed-rewrite DOPPELGANG_VERSION in version.env to the given semver. The
 # version is burnt into the binary at build time via -ldflags (auto-injected
-# by the amarbel-llc fork's buildGoApplication overlay), so flake.nix is the
+# by the amarbel-llc fork's buildGoApplication overlay), so version.env is the
 # single source of truth. No-op if already at the target version. Usage:
 # just bump-version 0.0.2
 bump-version new_version:
     #!/usr/bin/env bash
     set -euo pipefail
-    current=$(grep 'doppelgangVersion = ' flake.nix | sed 's/.*"\(.*\)".*/\1/')
+    current=$(grep 'DOPPELGANG_VERSION=' version.env | sed 's/.*=\(.*\)/\1/')
     if [[ "$current" == "{{new_version}}" ]]; then
       gum log --level info "already at {{new_version}}"
       exit 0
     fi
-    sed -i.bak 's/doppelgangVersion = "'"$current"'"/doppelgangVersion = "{{new_version}}"/' flake.nix && rm flake.nix.bak
-    gum log --level info "bumped doppelgangVersion: $current → {{new_version}}"
+    sed -i.bak 's/DOPPELGANG_VERSION='"$current"'/DOPPELGANG_VERSION={{new_version}}/' version.env && rm version.env.bak
+    gum log --level info "bumped DOPPELGANG_VERSION: $current → {{new_version}}"
 
-# Cut a release: must be run on master. Bumps doppelgangVersion in flake.nix,
+# Cut a release: must be run on master. Bumps DOPPELGANG_VERSION in version.env,
 # commits the bump with a changelog-style message built from commits since
 # the last v* tag, pushes master, then signs and pushes the v{{version}}
 # tag. The "v" prefix is added for you, so pass the semver without it.
@@ -148,13 +176,10 @@ release version:
       msg="$header"
     fi
     just bump-version "{{version}}"
-    if ! git diff --quiet flake.nix; then
-      git add flake.nix
+    if ! git diff --quiet version.env; then
+      git add version.env
       git commit -m "chore: release v{{version}}"
       git push origin master
-      gum log --level info "pushed flake.nix bump to master"
+      gum log --level info "pushed version.env bump to master"
     fi
     just tag "{{version}}" "$msg"
-
-clean:
-  rm -rf result result-*

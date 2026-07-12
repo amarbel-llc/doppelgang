@@ -69,8 +69,8 @@ func TestValidNixpkgsSHA(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"",
-		"567a49d",                                  // too short
-		"567A49D1913CE81AC6E9582E3553DD90A955875F", // uppercase
+		"567a49d", // too short
+		"567A49D1913CE81AC6E9582E3553DD90A955875F",  // uppercase
 		"567a49d1913ce81ac6e9582e3553dd90a955875f0", // 41 chars
 		"github:NixOS/nixpkgs/" + conformantSHA,     // full url, not a bare sha
 	} {

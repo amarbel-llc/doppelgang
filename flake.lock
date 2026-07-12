@@ -33,6 +33,32 @@
         "type": "github"
       }
     },
+    "conformist": {
+      "inputs": {
+        "igloo": [
+          "igloo"
+        ],
+        "nixpkgs-master": [
+          "nixpkgs-master"
+        ],
+        "utils": [
+          "utils"
+        ]
+      },
+      "locked": {
+        "lastModified": 1783882300,
+        "narHash": "sha256-aK0LVzftd/E7LR8tgjTsnEkLSyZecMqjtqyq4VDeHEc=",
+        "ref": "refs/heads/master",
+        "rev": "275968632782fd978b9db60926990fc38f3715bb",
+        "revCount": 144,
+        "type": "git",
+        "url": "https://code.linenisgreat.com/conformist.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://code.linenisgreat.com/conformist.git"
+      }
+    },
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
@@ -62,9 +88,7 @@
           "nixpkgs-master"
         ],
         "systems": "systems",
-        "treefmt-nix": [
-          "treefmt-nix"
-        ]
+        "treefmt-nix": "treefmt-nix"
       },
       "locked": {
         "lastModified": 1783336640,
@@ -98,9 +122,9 @@
     },
     "root": {
       "inputs": {
+        "conformist": "conformist",
         "igloo": "igloo",
         "nixpkgs-master": "nixpkgs-master",
-        "treefmt-nix": "treefmt-nix",
         "utils": "utils"
       }
     },
@@ -122,7 +146,8 @@
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
-          "igloo"
+          "igloo",
+          "nixpkgs-master"
         ]
       },
       "locked": {

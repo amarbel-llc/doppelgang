@@ -6,8 +6,10 @@ import (
 )
 
 // pinnedSHA is a real 40-hex nixpkgs revision, used as the repair target.
-const pinnedSHA = "567a49d1913ce81ac6e9582e3553dd90a955875f"
-const pinnedURL = "github:NixOS/nixpkgs/" + pinnedSHA
+const (
+	pinnedSHA = "567a49d1913ce81ac6e9582e3553dd90a955875f"
+	pinnedURL = "github:NixOS/nixpkgs/" + pinnedSHA
+)
 
 // TestInputURLBlockForm reads a nixpkgs-master url declared flat inside an
 // `inputs = { … }` block — the shape most of the fleet uses.

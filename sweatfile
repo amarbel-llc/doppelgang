@@ -2,3 +2,6 @@
 
 [hooks]
 pre-merge = "just"
+# The toolchain-hermetic staged-formatting hook from this repo's conformist
+# config (packages.conformist-pre-commit, on the devShell PATH).
+pre-commit = "conformist-pre-commit"
