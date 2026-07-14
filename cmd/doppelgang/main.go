@@ -231,7 +231,7 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 
 	if *fix {
-		return lintFix(ctx, *flakeDir, report, sel, *nixpkgsMasterSHA, resolvedPAPIDomain)
+		return lintFix(ctx, *flakeDir, report, sel, *nixpkgsMasterSHA)
 	}
 
 	// Exit non-zero when a *selected* check reports a finding so `lint` can
@@ -449,7 +449,7 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 // repair. When a canonical-inputs edit rides alongside a follows/dead edit,
 // the shared re-lock those require will pick it up as a side effect.
 // flake.nix is always staged regardless.
-func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string, papiDomain string) int {
+func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string) int {
 	var followsLines []string
 	if sel.Has(lint.CheckFollows) {
 		for _, r := range report.Follows {
