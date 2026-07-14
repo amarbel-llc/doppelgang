@@ -109,6 +109,22 @@ func LintText(w io.Writer, s LintSummary) error {
 		}
 	}
 
+	if s.active(lint.CheckCanonicalInputs) {
+		if _, err := fmt.Fprintf(w, "\n── canonical inputs ──\n"); err != nil {
+			return err
+		}
+		if len(s.Report.CanonicalInputs) == 0 {
+			if _, err := fmt.Fprintln(w, "(all inputs point at their PAPI-canonical URLs, or papi domain not set)"); err != nil {
+				return err
+			}
+		}
+		for _, f := range s.Report.CanonicalInputs {
+			if _, err := fmt.Fprintf(w, "%s: %q → %q\n", f.Input, f.CurrentURL, f.CanonicalURL); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -178,16 +194,22 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Status string `json:"status,omitempty"`
 		URL    string `json:"url,omitempty"`
 	}
+	type jsonCanonicalInput struct {
+		Input        string `json:"input"`
+		CurrentURL   string `json:"currentURL"`
+		CanonicalURL string `json:"canonicalURL"`
+	}
 	// Pointer fields with omitempty so a *deselected* check is absent from
 	// the document (nil pointer omitted), while a *selected* check with no
 	// findings still renders (an empty `[]` for the slice checks, or a
 	// `{"conformant":true}` object for nixpkgs-master). This lets a consumer
 	// distinguish "not checked" from "checked, clean".
 	out := struct {
-		Follows       *[]jsonFollows     `json:"followsOpportunities,omitempty"`
-		MultiVersion  *[]jsonMulti       `json:"multiVersionInputs,omitempty"`
-		DeadOverrides *[]jsonDead        `json:"deadOverrides,omitempty"`
-		NixpkgsMaster *jsonNixpkgsMaster `json:"nixpkgsMaster,omitempty"`
+		Follows         *[]jsonFollows        `json:"followsOpportunities,omitempty"`
+		MultiVersion    *[]jsonMulti          `json:"multiVersionInputs,omitempty"`
+		DeadOverrides   *[]jsonDead           `json:"deadOverrides,omitempty"`
+		NixpkgsMaster   *jsonNixpkgsMaster    `json:"nixpkgsMaster,omitempty"`
+		CanonicalInputs *[]jsonCanonicalInput `json:"canonicalInputs,omitempty"`
 	}{}
 	if s.active(lint.CheckFollows) {
 		follows := make([]jsonFollows, 0, len(s.Report.Follows))
@@ -225,6 +247,17 @@ func LintJSON(w io.Writer, s LintSummary) error {
 			nm.URL = s.Report.NixpkgsMaster.URL
 		}
 		out.NixpkgsMaster = nm
+	}
+	if s.active(lint.CheckCanonicalInputs) {
+		ci := make([]jsonCanonicalInput, 0, len(s.Report.CanonicalInputs))
+		for _, f := range s.Report.CanonicalInputs {
+			ci = append(ci, jsonCanonicalInput{
+				Input:        f.Input,
+				CurrentURL:   f.CurrentURL,
+				CanonicalURL: f.CanonicalURL,
+			})
+		}
+		out.CanonicalInputs = &ci
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -301,6 +334,12 @@ type ndjsonDeadDiag struct {
 type ndjsonNixpkgsMasterDiag struct {
 	Status string `json:"status"`
 	URL    string `json:"url,omitempty"`
+}
+
+type ndjsonCanonicalInputDiag struct {
+	Input        string `json:"input"`
+	CurrentURL   string `json:"currentURL"`
+	CanonicalURL string `json:"canonicalURL"`
 }
 
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
@@ -387,14 +426,30 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		})
 	}
 
+	canonicalInputs := ndjsonTest{
+		Type:        "test",
+		Description: "canonical inputs",
+		OK:          len(s.Report.CanonicalInputs) == 0,
+	}
+	for i, f := range s.Report.CanonicalInputs {
+		canonicalInputs.Subtest = append(canonicalInputs.Subtest, ndjsonTest{
+			Type:        "test",
+			N:           i + 1,
+			Description: fmt.Sprintf("%s: non-canonical URL %q", f.Input, f.CurrentURL),
+			OK:          false,
+			Diagnostic:  ndjsonCanonicalInputDiag{Input: f.Input, CurrentURL: f.CurrentURL, CanonicalURL: f.CanonicalURL},
+		})
+	}
+
 	// Only the selected checks become top-level test points, renumbered
 	// 1..k in canonical order so the plan count and the N fields agree with
 	// the selection (rather than the fixed set).
 	byCheck := map[lint.Check]ndjsonTest{
-		lint.CheckFollows:       follows,
-		lint.CheckMultiVersion:  multi,
-		lint.CheckDeadOverrides: dead,
-		lint.CheckNixpkgsMaster: nixpkgsMaster,
+		lint.CheckFollows:         follows,
+		lint.CheckMultiVersion:    multi,
+		lint.CheckDeadOverrides:   dead,
+		lint.CheckNixpkgsMaster:   nixpkgsMaster,
+		lint.CheckCanonicalInputs: canonicalInputs,
 	}
 	var checks []ndjsonTest
 	for _, c := range lint.AllChecks {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -64,8 +65,9 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "                   [--top N] [--by-owner] [--no-version-drift] [--json]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang why <regex|/nix/store/...> [--installable .#default] [--scope runtime|build]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang lint [--flake .] [--format auto|text|json|ndjson]\n")
-	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides,nixpkgs-master]\n")
+	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides,nixpkgs-master,canonical-inputs]\n")
 	fmt.Fprintf(os.Stderr, "                  [--online] [--fix] [--nixpkgs-master-sha <40-hex>]\n")
+	fmt.Fprintf(os.Stderr, "                  [--papi-domain <domain>]\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
@@ -90,6 +92,12 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "then re-locks via `nix flake lock` and stages the touched files (needs nix on PATH;\n")
 	fmt.Fprintf(os.Stderr, "implies --online). Multi-version inputs and transitive dead overrides stay\n")
 	fmt.Fprintf(os.Stderr, "report-only — collapsing/relocating them is not a local mechanical edit.\n")
+	fmt.Fprintf(os.Stderr, "The canonical-inputs check (opt-in) verifies each top-level input whose name\n")
+	fmt.Fprintf(os.Stderr, "matches a repo published by the PAPI domain uses that repo's canonical forge URL\n")
+	fmt.Fprintf(os.Stderr, "(git+https://...). --fix rewrites non-canonical URLs in flake.nix (byte-preserving)\n")
+	fmt.Fprintf(os.Stderr, "and does NOT re-lock — locking is left to the caller (the cascade's nix flake\n")
+	fmt.Fprintf(os.Stderr, "update). --papi-domain sets the identity domain for the papi call (also read from\n")
+	fmt.Fprintf(os.Stderr, "PAPI_DOMAIN env var); when absent the check degrades gracefully to no-op.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -157,6 +165,7 @@ func lintMain(ctx context.Context, args []string) int {
 	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
 	online := fs.Bool("online", false, "additionally detect transitive dead overrides by fetching upstream flake.nix files (read-only, best-effort; implied by --fix)")
 	nixpkgsMasterSHA := fs.String("nixpkgs-master-sha", "", "40-hex nixpkgs revision to pin the nixpkgs-master input to; required with --fix when the nixpkgs-master check is selected")
+	papiDomain := fs.String("papi-domain", "", "PAPI identity domain for the canonical-inputs check (e.g. linenisgreat.com); also read from PAPI_DOMAIN env var")
 	_ = fs.Parse(args)
 
 	sel, err := lint.ParseSelection(*checks)
@@ -180,6 +189,13 @@ func lintMain(ctx context.Context, args []string) int {
 		}
 	}
 
+	// Resolve the PAPI domain for the canonical-inputs check: --papi-domain
+	// flag takes precedence; PAPI_DOMAIN env var is the fallback.
+	resolvedPAPIDomain := *papiDomain
+	if resolvedPAPIDomain == "" {
+		resolvedPAPIDomain = os.Getenv("PAPI_DOMAIN")
+	}
+
 	resolved, err := resolveLintFormat(*format, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
@@ -191,7 +207,7 @@ func lintMain(ctx context.Context, args []string) int {
 	// (which is already impure). Plain `lint` stays offline. The selection
 	// also gates which checks are analyzed, rendered, and counted toward the
 	// exit code.
-	report, err := analyzeFlake(ctx, *flakeDir, sel, *fix || *online)
+	report, err := analyzeFlake(ctx, *flakeDir, sel, *fix || *online, resolvedPAPIDomain)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1
@@ -212,7 +228,7 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 
 	if *fix {
-		return lintFix(ctx, *flakeDir, report, sel, *nixpkgsMasterSHA)
+		return lintFix(ctx, *flakeDir, report, sel, *nixpkgsMasterSHA, resolvedPAPIDomain)
 	}
 
 	// Exit non-zero when a *selected* check reports a finding so `lint` can
@@ -241,18 +257,32 @@ func lintMain(ctx context.Context, args []string) int {
 // overrides — those declared in an upstream flake's flake.nix — by fetching
 // those files. Any fetch failure is a silent no-op, so transitive findings
 // are present only when reachable.
-func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool) (lint.Report, error) {
+//
+// When canonical-inputs is selected and papiDomain is non-empty, the check
+// calls `papi repos <domain>` to discover canonical URLs and compares each
+// root-level input. A papi failure degrades to zero findings (offline
+// degrade), not a hard error.
+func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool, papiDomain string) (lint.Report, error) {
 	var report lint.Report
-	// The follows, multi-version, and dead-overrides checks all need the
-	// lock; the nixpkgs-master convention check reads flake.nix alone. Load
-	// the lock only when a lock-dependent check is selected, so
-	// `--checks nixpkgs-master` works on a freshly-cloned repo that has no
-	// flake.lock yet (the self-onboarding case).
-	if sel.Has(lint.CheckFollows) || sel.Has(lint.CheckMultiVersion) || sel.Has(lint.CheckDeadOverrides) {
-		lock, err := flakelock.Load(flakeDir)
+	// Load the lock when any lock-dependent check is selected. The
+	// nixpkgs-master check reads flake.nix alone and does not need the lock,
+	// so `--checks nixpkgs-master` works on a freshly-cloned repo with no
+	// flake.lock yet (the self-onboarding case). canonical-inputs joins the
+	// three original lock-dependent checks here.
+	needsLock := sel.Has(lint.CheckFollows) || sel.Has(lint.CheckMultiVersion) ||
+		sel.Has(lint.CheckDeadOverrides) || sel.Has(lint.CheckCanonicalInputs)
+	var lock *flakelock.Lock
+	if needsLock {
+		var err error
+		lock, err = flakelock.Load(flakeDir)
 		if err != nil {
 			return lint.Report{}, err
 		}
+	}
+	// Preserve pre-existing behaviour: the Follows+MultiVersion analyses are
+	// always computed together when any of the original three lock checks are
+	// selected (filtering is cheap and happens at render/exit time).
+	if sel.Has(lint.CheckFollows) || sel.Has(lint.CheckMultiVersion) || sel.Has(lint.CheckDeadOverrides) {
 		report = lint.Analyze(lock)
 		if sel.Has(lint.CheckDeadOverrides) {
 			report.DeadOverrides = directDeadOverrides(flakeDir, lock)
@@ -264,7 +294,56 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 	if sel.Has(lint.CheckNixpkgsMaster) {
 		report.NixpkgsMaster = nixpkgsMasterFinding(flakeDir)
 	}
+	if sel.Has(lint.CheckCanonicalInputs) {
+		report.CanonicalInputs = canonicalInputFindings(ctx, flakeDir, lock, papiDomain)
+	}
 	return report, nil
+}
+
+// canonicalInputFindings queries the PAPI domain for the canonical repo-URL
+// map and checks each root-level lock input against it. Returns nil when
+// papiDomain is empty or the papi call fails (offline degrade).
+func canonicalInputFindings(ctx context.Context, flakeDir string, lock *flakelock.Lock, papiDomain string) []lint.CanonicalInputFinding {
+	if papiDomain == "" {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: --papi-domain (or PAPI_DOMAIN) not set; skipping canonical-inputs check\n")
+		return nil
+	}
+	repoURLs := papiRepoURLs(ctx, papiDomain)
+	if len(repoURLs) == 0 {
+		return nil
+	}
+	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	if err != nil {
+		return nil
+	}
+	return lint.CanonicalInputs(lock, src, repoURLs)
+}
+
+// papiRepoURLs calls `papi repos <domain>` and returns a map of repo name to
+// canonical nix flake URL (git+<https-url>.git). Returns nil when papi is
+// unavailable or the response is unparseable (offline degrade). All errors
+// are reported to stderr and treated as non-fatal.
+func papiRepoURLs(ctx context.Context, domain string) map[string]string {
+	out, err := exec.CommandContext(ctx, "papi", "repos", domain).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: papi repos %s unavailable (%v); skipping canonical-inputs check\n", domain, err)
+		return nil
+	}
+	var repos []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := json.Unmarshal(out, &repos); err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: papi repos %s response unparseable; skipping canonical-inputs check\n", domain)
+		return nil
+	}
+	m := make(map[string]string, len(repos))
+	for _, r := range repos {
+		if r.Name != "" && r.URL != "" {
+			m[r.Name] = lint.CanonicalNixURL(r.URL)
+		}
+	}
+	return m
 }
 
 // nixpkgsMasterFinding reads <flakeDir>/flake.nix and classifies its
@@ -321,6 +400,9 @@ func reportHasFindings(r lint.Report, sel lint.Selection) bool {
 	if sel.Has(lint.CheckNixpkgsMaster) && r.NixpkgsMaster != nil {
 		return true
 	}
+	if sel.Has(lint.CheckCanonicalInputs) && len(r.CanonicalInputs) > 0 {
+		return true
+	}
 	return false
 }
 
@@ -340,10 +422,11 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 }
 
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
-// — splicing in follows-opportunity lines and pruning direct dead follows
-// overrides — then re-locks via `nix flake lock`, stages the touched files,
-// and re-analyzes to compute an honest exit code. It is invoked only under
-// --fix, after the report has already been rendered.
+// — splicing in follows-opportunity lines, pruning direct dead follows
+// overrides, pinning nixpkgs-master, and rewriting non-canonical input URLs —
+// then re-locks via `nix flake lock` (for lock-affecting edits), stages the
+// touched files, and re-analyzes to compute an honest exit code. It is
+// invoked only under --fix, after the report has already been rendered.
 //
 // Two finding classes are report-only and never auto-resolved: multi-version
 // inputs (choosing a revision changes behavior) and transitive dead overrides
@@ -356,21 +439,21 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 //
 // The selection gates which classes are auto-fixed: follows lines only when
 // the follows check is selected, direct dead overrides only when the
-// dead-overrides check is selected, and the nixpkgs-master pin only when the
-// nixpkgs-master check is selected. A deselected check is neither applied nor
-// counted toward the report-only accounting or the exit code.
+// dead-overrides check is selected, the nixpkgs-master pin only when the
+// nixpkgs-master check is selected, and canonical-input URL rewrites only
+// when the canonical-inputs check is selected. A deselected check is neither
+// applied nor counted toward the report-only accounting or the exit code.
 //
 // Locking policy: the follows-collapse and dead-override prunes are
 // re-locked (`nix flake lock`) here because they rewrite the lock graph the
-// finding was derived from. The nixpkgs-master pin is NOT re-locked by this
-// tool — it edits flake.nix only and leaves materializing the new/updated
-// input into flake.lock to the caller. eng's update-nix cascade runs
-// `nix flake update` immediately after this repair, so a standalone
-// nixpkgs-master fix would otherwise force a redundant (and, for a freshly
-// added input, network-fetching) re-lock. When a nixpkgs-master edit rides
-// alongside a follows/dead edit, the shared re-lock those require will pick
-// it up as a side effect. flake.nix is always staged regardless.
-func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string) int {
+// finding was derived from. The nixpkgs-master pin and canonical-input URL
+// rewrites are NOT re-locked by this tool — they edit flake.nix only and
+// leave materializing the new/updated inputs into flake.lock to the caller.
+// eng's update-nix cascade runs `nix flake update` immediately after this
+// repair. When a canonical-inputs edit rides alongside a follows/dead edit,
+// the shared re-lock those require will pick it up as a side effect.
+// flake.nix is always staged regardless.
+func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string, papiDomain string) int {
 	var followsLines []string
 	if sel.Has(lint.CheckFollows) {
 		for _, r := range report.Follows {
@@ -388,8 +471,9 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// The upfront validation in lintMain guarantees a valid sha here whenever
 	// the nixpkgs-master check is selected under --fix.
 	fixNixpkgsMaster := sel.Has(lint.CheckNixpkgsMaster) && report.NixpkgsMaster != nil
+	fixCanonicalInputs := sel.Has(lint.CheckCanonicalInputs) && len(report.CanonicalInputs) > 0
 
-	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster {
+	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster && !fixCanonicalInputs {
 		if remaining := reportOnlyCount(report, sel); remaining > 0 {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
@@ -435,13 +519,29 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			return 1
 		}
 	}
+	var canonicalURLsRewritten []lint.CanonicalInputFinding
+	if fixCanonicalInputs {
+		for _, f := range report.CanonicalInputs {
+			var changed bool
+			out, changed, err = nixedit.SetInputURL(out, f.Input, f.CanonicalURL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not rewrite %s.url in %s automatically (%v).\n"+
+					"Set `%s.url = %q` by hand.\n", f.Input, nixPath, err, f.Input, f.CanonicalURL)
+				return 1
+			}
+			if changed {
+				canonicalURLsRewritten = append(canonicalURLsRewritten, f)
+			}
+		}
+	}
 
 	// Follows and dead-override edits rewrite the lock graph, so they trigger
-	// a re-lock below; the nixpkgs-master pin does not (its lock is left to
-	// the caller — see the function doc).
+	// a re-lock below; nixpkgs-master and canonical-input URL edits do not
+	// (their locks are left to the caller — see the function doc).
 	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
+	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || len(canonicalURLsRewritten) > 0
 
-	if !lockAffecting && !nixpkgsMasterChanged {
+	if !flakeNixChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
 	} else {
 		if err := os.WriteFile(nixPath, out, 0o644); err != nil {
@@ -463,9 +563,12 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		if nixpkgsMasterChanged {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pinned nixpkgs-master in %s to %s\n", nixPath, nixpkgsMasterURL)
 		}
-		// Re-lock only for lock-affecting edits. A nixpkgs-master-only fix
-		// edits flake.nix and stages it, leaving lock materialization to the
-		// caller (eng's cascade runs `nix flake update` next).
+		for _, f := range canonicalURLsRewritten {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: rewrote %s.url in %s: %s → %s\n", f.Input, nixPath, f.CurrentURL, f.CanonicalURL)
+		}
+		// Re-lock only for lock-affecting edits. nixpkgs-master and
+		// canonical-inputs edits leave lock materialization to the caller
+		// (eng's cascade runs `nix flake update` next).
 		if lockAffecting {
 			if err := relock(flakeDir); err != nil {
 				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-lock failed: %v\n", err)
@@ -477,11 +580,14 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 
 	// Re-analyze the (possibly regenerated) lock + edited flake.nix for an
 	// honest exit code, under the same selection. This pass is offline
-	// (online=false): pruning a direct override cannot change the transitive
-	// findings, so those are carried forward from the pre-fix report rather
-	// than re-fetched. Each remaining-finding check is gated by the
-	// selection so a deselected category never holds the exit non-zero.
-	after, err := analyzeFlake(ctx, flakeDir, sel, false)
+	// (online=false, papiDomain=""): pruning a direct override cannot change
+	// the transitive findings, so those are carried forward from the pre-fix
+	// report rather than re-fetched. canonical-inputs findings after the URL
+	// rewrite would require re-fetching papi (the URLs are already in
+	// report.CanonicalInputs); we check the length directly instead.
+	// Each remaining-finding check is gated by the selection so a deselected
+	// category never holds the exit non-zero.
+	after, err := analyzeFlake(ctx, flakeDir, sel, false, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
@@ -506,6 +612,14 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	}
 	if sel.Has(lint.CheckNixpkgsMaster) && after.NixpkgsMaster != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nixpkgs-master still non-conformant after fix (%s); re-run lint for detail\n", after.NixpkgsMaster.Status)
+		return 1
+	}
+	// canonical-inputs: the re-analyze pass runs with empty papiDomain (no
+	// network call), so after.CanonicalInputs is always nil. Instead verify
+	// that every finding in the pre-fix report was actually rewritten.
+	if sel.Has(lint.CheckCanonicalInputs) && len(canonicalURLsRewritten) < len(report.CanonicalInputs) {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d canonical-input URL(s) not rewritten (already correct or unparseable); re-run lint for detail\n",
+			len(report.CanonicalInputs)-len(canonicalURLsRewritten))
 		return 1
 	}
 	return 0

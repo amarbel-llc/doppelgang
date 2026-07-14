@@ -1,0 +1,82 @@
+package lint
+
+import (
+	"sort"
+
+	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"github.com/friedenberg/doppelgang/internal/0/nixedit"
+)
+
+// CanonicalInputFinding reports that a top-level flake input's URL does not
+// match the PAPI-published canonical clone URL for that repository. The
+// canonical URL is the git+https form derived from the repo's PAPI web URL
+// (git+<url>.git). A conformant input — or one not published by the PAPI
+// domain — produces no finding.
+type CanonicalInputFinding struct {
+	// Input is the top-level input name in flake.nix (e.g. "igloo").
+	Input string
+	// CurrentURL is the current .url binding from flake.nix, e.g.
+	// "github:amarbel-llc/igloo". Empty when the binding is absent or not a
+	// plain quoted string (both are skipped; this field is informational only).
+	CurrentURL string
+	// CanonicalURL is the PAPI-derived canonical nix flake URL for this repo,
+	// e.g. "git+https://code.linenisgreat.com/igloo.git". This is the value
+	// the repair writes.
+	CanonicalURL string
+}
+
+// CanonicalInputs checks each top-level root input in the lock against the
+// PAPI repo-URL map and returns findings for inputs whose flake.nix URL does
+// not match the canonical form. repoURLs maps repo name to canonical nix URL
+// (built by the caller from `papi repos <domain>` JSON output). src is the
+// content of flake.nix. When repoURLs is empty or src is nil, the function
+// returns nil (offline / unconfigured degrade).
+//
+// Only inputs that resolve to an actual lock node (not a follows-resolved
+// alias) are considered. Inputs not present in repoURLs are silently skipped.
+// Inputs whose current URL binding is absent or not a plain quoted string are
+// skipped (safe conservative outcome, matching nixedit's behaviour for
+// unparseable values).
+func CanonicalInputs(l *flakelock.Lock, src []byte, repoURLs map[string]string) []CanonicalInputFinding {
+	if len(repoURLs) == 0 || len(src) == 0 {
+		return nil
+	}
+	root, ok := l.Nodes[l.Root]
+	if !ok {
+		return nil
+	}
+	var findings []CanonicalInputFinding
+	for inputName, ref := range root.Inputs {
+		if ref.Node == "" {
+			continue // follows-resolved alias; not a direct input URL
+		}
+		canonicalURL, ok := repoURLs[inputName]
+		if !ok {
+			continue // not published by the PAPI domain; skip
+		}
+		currentURL, present, err := nixedit.InputURL(src, inputName)
+		if err != nil || !present {
+			continue // unparseable or absent URL binding; skip
+		}
+		if currentURL == canonicalURL {
+			continue // already canonical
+		}
+		findings = append(findings, CanonicalInputFinding{
+			Input:        inputName,
+			CurrentURL:   currentURL,
+			CanonicalURL: canonicalURL,
+		})
+	}
+	sort.Slice(findings, func(i, j int) bool {
+		return findings[i].Input < findings[j].Input
+	})
+	return findings
+}
+
+// CanonicalNixURL converts a PAPI repo web URL (e.g.
+// "https://code.linenisgreat.com/igloo") to the canonical nix flake input URL
+// ("git+https://code.linenisgreat.com/igloo.git"). It is the only place this
+// derivation lives so callers (the papi query and tests) agree.
+func CanonicalNixURL(papiWebURL string) string {
+	return "git+" + papiWebURL + ".git"
+}

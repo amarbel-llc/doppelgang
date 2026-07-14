@@ -28,6 +28,11 @@ type Report struct {
 	// (not the lock); a conformant flake — and Analyze, which never runs
 	// this check — leaves it nil. See CheckNixpkgsMaster.
 	NixpkgsMaster *NixpkgsMasterFinding
+	// CanonicalInputs lists top-level inputs whose URL does not match the
+	// PAPI-published canonical clone URL for that repository. It requires both
+	// flake.lock (for root-input enumeration) and flake.nix (for URL reading),
+	// plus a live papi call; Analyze leaves it nil. See CheckCanonicalInputs.
+	CanonicalInputs []CanonicalInputFinding
 }
 
 // FollowsRec recommends collapsing a set of nodes that pin an identical

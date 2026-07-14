@@ -44,7 +44,7 @@ func TestAnalyzeFlakeDetectsDirectDeadOverride(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false)
+	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestAnalyzeFlakeNoFalsePositive(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false)
+	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestAnalyzeFlakeSkipsDeadOverridesWhenDeselected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestAnalyzeFlakeDetectsMissingNixpkgsMaster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestAnalyzeFlakeNixpkgsMasterConformant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestAnalyzeFlakeNixpkgsMasterWithoutLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false)
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
 	if err != nil {
 		t.Fatalf("analyzeFlake must not require a lock for the nixpkgs-master check: %v", err)
 	}

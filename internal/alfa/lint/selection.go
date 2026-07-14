@@ -6,31 +6,33 @@ import (
 	"strings"
 )
 
-// Check identifies one of lint's three analyses. The string value is the
+// Check identifies one of lint's analyses. The string value is the
 // name accepted by `doppelgang lint --checks`.
 type Check string
 
 const (
-	CheckFollows       Check = "follows"
-	CheckMultiVersion  Check = "multi-version"
-	CheckDeadOverrides Check = "dead-overrides"
-	CheckNixpkgsMaster Check = "nixpkgs-master"
+	CheckFollows         Check = "follows"
+	CheckMultiVersion    Check = "multi-version"
+	CheckDeadOverrides   Check = "dead-overrides"
+	CheckNixpkgsMaster   Check = "nixpkgs-master"
+	CheckCanonicalInputs Check = "canonical-inputs"
 )
 
 // AllChecks is the canonical order of every check. Renderers iterate this
 // and filter by the active Selection so output order is stable regardless
 // of which subset is selected.
-var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, CheckNixpkgsMaster}
+var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, CheckNixpkgsMaster, CheckCanonicalInputs}
 
 // DefaultChecks is the subset selected when `--checks` is absent — the three
 // flake.lock/flake.nix analyses that need no external parameter. The
-// nixpkgs-master convention check is deliberately excluded from the default:
-// it encodes an amarbel-llc-fleet policy (a specific input pinned a specific
-// way) rather than a universal reducible-duplication finding, so a plain
-// `lint` on an arbitrary flake must not fail for lacking it. It is opt-in via
-// `--checks nixpkgs-master` (or the `all` alias). Keeping the default at three
-// also preserves the pre-existing exit-code, output, and NDJSON plan-count
-// behavior for every existing consumer.
+// nixpkgs-master and canonical-inputs checks are deliberately excluded from
+// the default: they encode fleet policy rather than universal
+// reducible-duplication findings, and canonical-inputs additionally requires a
+// network call (papi) and a --papi-domain parameter. Both are opt-in via
+// `--checks nixpkgs-master` / `--checks canonical-inputs` (or the `all`
+// alias). Keeping the default at three also preserves the pre-existing
+// exit-code, output, and NDJSON plan-count behavior for every existing
+// consumer.
 var DefaultChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides}
 
 // Selection is the set of enabled checks. The zero value (nil) enables
