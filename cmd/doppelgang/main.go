@@ -195,6 +195,9 @@ func lintMain(ctx context.Context, args []string) int {
 	if resolvedPAPIDomain == "" {
 		resolvedPAPIDomain = os.Getenv("PAPI_DOMAIN")
 	}
+	if sel.Has(lint.CheckCanonicalInputs) && resolvedPAPIDomain == "" {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: --papi-domain (or PAPI_DOMAIN) not set; skipping canonical-inputs check\n")
+	}
 
 	resolved, err := resolveLintFormat(*format, os.Stdout)
 	if err != nil {
@@ -305,17 +308,10 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 // papiDomain is empty or the papi call fails (offline degrade).
 func canonicalInputFindings(ctx context.Context, flakeDir string, lock *flakelock.Lock, papiDomain string) []lint.CanonicalInputFinding {
 	if papiDomain == "" {
-		fmt.Fprintf(os.Stderr, "doppelgang lint: --papi-domain (or PAPI_DOMAIN) not set; skipping canonical-inputs check\n")
 		return nil
 	}
 	repoURLs := papiRepoURLs(ctx, papiDomain)
-	if len(repoURLs) == 0 {
-		return nil
-	}
-	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
-	if err != nil {
-		return nil
-	}
+	src, _ := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
 	return lint.CanonicalInputs(lock, src, repoURLs)
 }
 
@@ -519,7 +515,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			return 1
 		}
 	}
-	var canonicalURLsRewritten []lint.CanonicalInputFinding
+	var canonicalURLsRewritten int
 	if fixCanonicalInputs {
 		for _, f := range report.CanonicalInputs {
 			var changed bool
@@ -530,7 +526,8 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 				return 1
 			}
 			if changed {
-				canonicalURLsRewritten = append(canonicalURLsRewritten, f)
+				canonicalURLsRewritten++
+				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: rewrote %s.url in %s: %s → %s\n", f.Input, nixPath, f.CurrentURL, f.CanonicalURL)
 			}
 		}
 	}
@@ -539,7 +536,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// a re-lock below; nixpkgs-master and canonical-input URL edits do not
 	// (their locks are left to the caller — see the function doc).
 	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
-	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || len(canonicalURLsRewritten) > 0
+	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0
 
 	if !flakeNixChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
@@ -562,9 +559,6 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		}
 		if nixpkgsMasterChanged {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pinned nixpkgs-master in %s to %s\n", nixPath, nixpkgsMasterURL)
-		}
-		for _, f := range canonicalURLsRewritten {
-			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: rewrote %s.url in %s: %s → %s\n", f.Input, nixPath, f.CurrentURL, f.CanonicalURL)
 		}
 		// Re-lock only for lock-affecting edits. nixpkgs-master and
 		// canonical-inputs edits leave lock materialization to the caller
@@ -617,9 +611,9 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// canonical-inputs: the re-analyze pass runs with empty papiDomain (no
 	// network call), so after.CanonicalInputs is always nil. Instead verify
 	// that every finding in the pre-fix report was actually rewritten.
-	if sel.Has(lint.CheckCanonicalInputs) && len(canonicalURLsRewritten) < len(report.CanonicalInputs) {
+	if sel.Has(lint.CheckCanonicalInputs) && canonicalURLsRewritten < len(report.CanonicalInputs) {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d canonical-input URL(s) not rewritten (already correct or unparseable); re-run lint for detail\n",
-			len(report.CanonicalInputs)-len(canonicalURLsRewritten))
+			len(report.CanonicalInputs)-canonicalURLsRewritten)
 		return 1
 	}
 	return 0
