@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/friedenberg/doppelgang/internal/alfa/lint"
@@ -282,5 +284,88 @@ func TestResolveLintFormatAutoNonTTY(t *testing.T) {
 	}
 	if got != "ndjson" {
 		t.Errorf("auto on a non-TTY = %q, want ndjson", got)
+	}
+}
+
+// TestPapiRepoURLsFromJSONSingleEntry: a name that appears exactly once is
+// accepted unconditionally regardless of the canonical field — this is the
+// unchanged single-entry path.
+func TestPapiRepoURLsFromJSONSingleEntry(t *testing.T) {
+	data := []byte(`[{"name":"myrepo","url":"https://code.example.com/myrepo"}]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("single entry: unexpected stderr: %q", w.String())
+	}
+	want := "git+https://code.example.com/myrepo.git"
+	if got := m["myrepo"]; got != want {
+		t.Errorf("single entry: m[\"myrepo\"] = %q, want %q", got, want)
+	}
+}
+
+// TestPapiRepoURLsFromJSONDuplicateWithMarker: when a name appears twice and
+// exactly one entry carries canonical:true, that entry's URL wins.
+func TestPapiRepoURLsFromJSONDuplicateWithMarker(t *testing.T) {
+	data := []byte(`[
+		{"name":"myrepo","url":"https://code.example.com/myrepo","canonical":true},
+		{"name":"myrepo","url":"https://github.com/owner/myrepo","canonical":false}
+	]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("duplicate with marker: unexpected stderr: %q", w.String())
+	}
+	want := "git+https://code.example.com/myrepo.git"
+	if got := m["myrepo"]; got != want {
+		t.Errorf("duplicate with marker: m[\"myrepo\"] = %q, want %q", got, want)
+	}
+}
+
+// TestPapiRepoURLsFromJSONDuplicateNoMarker: when a name appears multiple
+// times with no canonical marker (pre-amendment server), the repo is skipped
+// and a warning is written — never let order pick silently.
+func TestPapiRepoURLsFromJSONDuplicateNoMarker(t *testing.T) {
+	data := []byte(`[
+		{"name":"myrepo","url":"https://code.example.com/myrepo"},
+		{"name":"myrepo","url":"https://github.com/owner/myrepo"}
+	]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if _, ok := m["myrepo"]; ok {
+		t.Errorf("duplicate no marker: myrepo should be absent from map, got %q", m["myrepo"])
+	}
+	if !strings.Contains(w.String(), "ambiguous") {
+		t.Errorf("duplicate no marker: expected ambiguous warning in stderr, got %q", w.String())
+	}
+}
+
+// TestPapiRepoURLsFromJSONDuplicateMultipleMarkers: when a name appears with
+// multiple canonical:true entries (server nonconformance), the repo is skipped
+// and a warning is written.
+func TestPapiRepoURLsFromJSONDuplicateMultipleMarkers(t *testing.T) {
+	data := []byte(`[
+		{"name":"myrepo","url":"https://code.example.com/myrepo","canonical":true},
+		{"name":"myrepo","url":"https://github.com/owner/myrepo","canonical":true}
+	]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if _, ok := m["myrepo"]; ok {
+		t.Errorf("multiple markers: myrepo should be absent from map, got %q", m["myrepo"])
+	}
+	if !strings.Contains(w.String(), "nonconformance") {
+		t.Errorf("multiple markers: expected nonconformance warning in stderr, got %q", w.String())
+	}
+}
+
+// TestPapiRepoURLsFromJSONUnparseable: an invalid JSON body returns nil and
+// writes an unparseable notice (offline-degrade contract).
+func TestPapiRepoURLsFromJSONUnparseable(t *testing.T) {
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", []byte(`not json`), &w)
+	if m != nil {
+		t.Errorf("unparseable: expected nil map, got %v", m)
+	}
+	if !strings.Contains(w.String(), "unparseable") {
+		t.Errorf("unparseable: expected unparseable notice in stderr, got %q", w.String())
 	}
 }

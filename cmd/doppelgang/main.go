@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -325,18 +326,53 @@ func papiRepoURLs(ctx context.Context, domain string) map[string]string {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: papi repos %s unavailable (%v); skipping canonical-inputs check\n", domain, err)
 		return nil
 	}
-	var repos []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
+	return papiRepoURLsFromJSON(domain, out, os.Stderr)
+}
+
+// papiRepoURLsFromJSON decodes the JSON output of `papi repos <domain>` and
+// returns a name→canonicalNixURL map. It handles dual-homed repos (papi#50):
+// when a name appears multiple times, exactly one entry must carry
+// canonical:true; zero or multiple markers are both treated as ambiguous and
+// the repo is skipped with a note written to w.
+func papiRepoURLsFromJSON(domain string, data []byte, w io.Writer) map[string]string {
+	type repoEntry struct {
+		Name      string `json:"name"`
+		URL       string `json:"url"`
+		Canonical bool   `json:"canonical"`
 	}
-	if err := json.Unmarshal(out, &repos); err != nil {
-		fmt.Fprintf(os.Stderr, "doppelgang lint: papi repos %s response unparseable; skipping canonical-inputs check\n", domain)
+	var repos []repoEntry
+	if err := json.Unmarshal(data, &repos); err != nil {
+		fmt.Fprintf(w, "doppelgang lint: papi repos %s response unparseable; skipping canonical-inputs check\n", domain)
 		return nil
 	}
-	m := make(map[string]string, len(repos))
+	byName := make(map[string][]repoEntry, len(repos))
 	for _, r := range repos {
-		if r.Name != "" && r.URL != "" {
-			m[r.Name] = lint.CanonicalNixURL(r.URL)
+		if r.Name == "" || r.URL == "" {
+			continue
+		}
+		byName[r.Name] = append(byName[r.Name], r)
+	}
+	m := make(map[string]string, len(byName))
+	for name, entries := range byName {
+		if len(entries) == 1 {
+			m[name] = lint.CanonicalNixURL(entries[0].URL)
+			continue
+		}
+		var canonicalURL string
+		canonicalCount := 0
+		for _, e := range entries {
+			if e.Canonical {
+				canonicalCount++
+				canonicalURL = e.URL
+			}
+		}
+		switch canonicalCount {
+		case 1:
+			m[name] = lint.CanonicalNixURL(canonicalURL)
+		case 0:
+			fmt.Fprintf(w, "doppelgang lint: papi repos %s: %q listed %d times with no canonical marker; skipping (ambiguous)\n", domain, name, len(entries))
+		default:
+			fmt.Fprintf(w, "doppelgang lint: papi repos %s: %q has %d canonical markers; skipping (server nonconformance)\n", domain, name, canonicalCount)
 		}
 	}
 	return m

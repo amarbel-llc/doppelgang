@@ -63,6 +63,30 @@ offline, tailnet not connected), the check degrades gracefully: zero findings,
 a stderr note, and a zero exit from the check itself. This matches the
 offline-degradation contract of every other papi-dependent path in the fleet.
 
+#### Dual-homed repos and the canonical marker (papi#53)
+
+The `/papi/repos` endpoint deliberately lists a dual-homed repo once per forge
+(papi#50) — so a repo mirrored to both the self-hosted forge and GitHub appears
+twice in the JSON array under the same `name`. The naive last-entry-wins map
+build lets server enumeration order decide which URL "wins", and this
+mis-flipped ~34 fleet inputs on 2026-07-14 (issue #18).
+
+Resolution (coordinating with papi#53, which amends RFC-0001): each entry
+carries a boolean `canonical` field. `papiRepoURLs` applies the following rules
+when constructing the name→URL map from the decoded JSON:
+
+- **Single entry for a name** — accepted unchanged; `canonical` is ignored.
+- **Multiple entries, exactly one marked `canonical:true`** — the marked
+  entry's URL is used; the others are discarded.
+- **Multiple entries, no entry marked** (pre-amendment server) — the repo is
+  treated as **ambiguous** and *skipped* with a stderr note. This is the
+  load-bearing behavior change: it stops mis-flips even before the server
+  publishes markers, because the check will simply not rewrite an input it
+  cannot resolve unambiguously.
+- **Multiple entries, more than one marked** (server nonconformance) — also
+  ambiguous, also skipped with a stderr note. The client never makes a
+  tiebreak for server-side protocol violations.
+
 ### Detection
 
 For each top-level root input that resolves to an actual lock node (not a
