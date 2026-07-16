@@ -77,10 +77,21 @@ func CanonicalInputs(l *flakelock.Lock, src []byte, repoURLs map[string]string) 
 	return findings
 }
 
+// NixURL returns the canonical nix flake URL for a PAPI entry using the
+// two-tier resolution introduced by papi#56: flakeURL verbatim when non-empty
+// (tarball form), otherwise the git+https form derived from webURL. This is
+// the authoritative resolution so all callers agree on the precedence.
+func NixURL(webURL, flakeURL string) string {
+	if flakeURL != "" {
+		return flakeURL
+	}
+	return CanonicalNixURL(webURL)
+}
+
 // CanonicalNixURL converts a PAPI repo web URL (e.g.
-// "https://code.linenisgreat.com/igloo") to the canonical nix flake input URL
-// ("git+https://code.linenisgreat.com/igloo.git"). It is the only place this
-// derivation lives so callers (the papi query and tests) agree.
+// "https://code.linenisgreat.com/igloo") to the git+https nix flake input URL
+// ("git+https://code.linenisgreat.com/igloo.git"). Use NixURL when a
+// flake_url field may also be present.
 func CanonicalNixURL(papiWebURL string) string {
 	return "git+" + papiWebURL + ".git"
 }

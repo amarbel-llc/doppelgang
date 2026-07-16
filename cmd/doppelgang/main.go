@@ -351,15 +351,6 @@ func papiRepoURLsFromJSON(domain string, data []byte, w io.Writer) map[string]st
 		Canonical bool   `json:"canonical"`
 		FlakeURL  string `json:"flake_url"`
 	}
-	// nixURL returns the canonical nix flake URL for an entry: flake_url
-	// verbatim when present (papi#56 tarball form), git+https derivation
-	// otherwise (original form, rollout-order-independent fallback).
-	nixURL := func(e repoEntry) string {
-		if e.FlakeURL != "" {
-			return e.FlakeURL
-		}
-		return lint.CanonicalNixURL(e.URL)
-	}
 	var repos []repoEntry
 	if err := json.Unmarshal(data, &repos); err != nil {
 		fmt.Fprintf(w, "doppelgang lint: papi repos %s response unparseable; skipping canonical-inputs check\n", domain)
@@ -375,24 +366,22 @@ func papiRepoURLsFromJSON(domain string, data []byte, w io.Writer) map[string]st
 	m := make(map[string]string, len(byName))
 	for name, entries := range byName {
 		if len(entries) == 1 {
-			m[name] = nixURL(entries[0])
+			m[name] = lint.NixURL(entries[0].URL, entries[0].FlakeURL)
 			continue
 		}
-		var canonical repoEntry
-		canonicalCount := 0
+		var canonicals []repoEntry
 		for _, e := range entries {
 			if e.Canonical {
-				canonicalCount++
-				canonical = e
+				canonicals = append(canonicals, e)
 			}
 		}
-		switch canonicalCount {
+		switch len(canonicals) {
 		case 1:
-			m[name] = nixURL(canonical)
+			m[name] = lint.NixURL(canonicals[0].URL, canonicals[0].FlakeURL)
 		case 0:
 			fmt.Fprintf(w, "doppelgang lint: papi repos %s: %q listed %d times with no canonical marker; skipping (ambiguous)\n", domain, name, len(entries))
 		default:
-			fmt.Fprintf(w, "doppelgang lint: papi repos %s: %q has %d canonical markers; skipping (server nonconformance)\n", domain, name, canonicalCount)
+			fmt.Fprintf(w, "doppelgang lint: papi repos %s: %q has %d canonical markers; skipping (server nonconformance)\n", domain, name, len(canonicals))
 		}
 	}
 	return m

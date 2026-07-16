@@ -146,6 +146,22 @@ func TestCanonicalNixURL(t *testing.T) {
 	}
 }
 
+func TestNixURLFlakeURLPresent(t *testing.T) {
+	got := NixURL("https://code.linenisgreat.com/igloo", "https://code.linenisgreat.com/igloo/archive/master.tar.gz")
+	want := "https://code.linenisgreat.com/igloo/archive/master.tar.gz"
+	if got != want {
+		t.Errorf("NixURL (flake_url present) = %q, want %q", got, want)
+	}
+}
+
+func TestNixURLFlakeURLAbsent(t *testing.T) {
+	got := NixURL("https://code.linenisgreat.com/igloo", "")
+	want := "git+https://code.linenisgreat.com/igloo.git"
+	if got != want {
+		t.Errorf("NixURL (flake_url absent) = %q, want %q", got, want)
+	}
+}
+
 func TestCanonicalInputsSorted(t *testing.T) {
 	// Multiple findings should be returned sorted by input name.
 	lock := &flakelock.Lock{
