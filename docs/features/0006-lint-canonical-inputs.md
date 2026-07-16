@@ -52,10 +52,25 @@ resolve directly against the forge and never lag.
 The check discovers the canonical URL for each repo from the operator's
 published PAPI (Personal API), whose `/papi/repos` resource enumerates every
 published repository with its canonical web URL. `papi repos <domain>` queries
-this endpoint and returns a JSON array; for each entry the canonical nix flake
-URL is `git+<url>.git` (prefixing `git+` and appending `.git` to the
-HTTPS web URL). No owner→forge table is hardcoded in doppelgang; the mapping
-is entirely PAPI-discovered.
+this endpoint and returns a JSON array. No owner→forge table is hardcoded in
+doppelgang; the mapping is entirely PAPI-discovered.
+
+The canonical nix flake URL is resolved from each entry in two tiers
+(papi#56 amendment, rollout-order-independent):
+
+1. **`flake_url` present** — the entry's `flake_url` field is used verbatim as
+   the nix input ref (e.g.
+   `https://code.linenisgreat.com/crap/archive/master.tar.gz`). This is the
+   tarball form: `nix flake update` tracks the branch while the archive's
+   `Link rel="immutable"` header pins the revision. The fleet may carry a mix
+   of entries with and without `flake_url` during rollout; each entry is
+   resolved independently, so no global ordering constraint exists between
+   server and consumer upgrades.
+
+2. **`flake_url` absent** (pre-papi#56 server or repo not yet upgraded) — the
+   canonical nix URL is derived from the web `url` field as `git+<url>.git`
+   (prefixing `git+` and appending `.git` to the HTTPS web URL). This is the
+   original git-fetcher form and remains the safe fallback.
 
 The domain is configured via `--papi-domain <domain>` (or the `PAPI_DOMAIN`
 environment variable). When neither is set, or when the `papi` call fails (e.g.

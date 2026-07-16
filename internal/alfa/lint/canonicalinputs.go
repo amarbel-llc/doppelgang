@@ -8,10 +8,11 @@ import (
 )
 
 // CanonicalInputFinding reports that a top-level flake input's URL does not
-// match the PAPI-published canonical clone URL for that repository. The
-// canonical URL is the git+https form derived from the repo's PAPI web URL
-// (git+<url>.git). A conformant input — or one not published by the PAPI
-// domain — produces no finding.
+// match the PAPI-published canonical nix URL for that repository. The canonical
+// URL is either the verbatim flake_url from the PAPI entry (papi#56 tarball
+// form, when present) or the git+https form derived from the web URL
+// (git+<url>.git) when flake_url is absent. A conformant input — or one not
+// published by the PAPI domain — produces no finding.
 type CanonicalInputFinding struct {
 	// Input is the top-level input name in flake.nix (e.g. "igloo").
 	Input string
@@ -19,8 +20,11 @@ type CanonicalInputFinding struct {
 	// "github:amarbel-llc/igloo". Empty when the binding is absent or not a
 	// plain quoted string (both are skipped; this field is informational only).
 	CurrentURL string
-	// CanonicalURL is the PAPI-derived canonical nix flake URL for this repo,
-	// e.g. "git+https://code.linenisgreat.com/igloo.git". This is the value
+	// CanonicalURL is the PAPI-authoritative canonical nix flake URL for this
+	// repo. It is either the verbatim flake_url from the PAPI entry (tarball
+	// form, e.g. "https://code.linenisgreat.com/igloo/archive/master.tar.gz")
+	// or the git+https form derived from the web URL
+	// (e.g. "git+https://code.linenisgreat.com/igloo.git"). This is the value
 	// the repair writes.
 	CanonicalURL string
 }

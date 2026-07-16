@@ -369,3 +369,75 @@ func TestPapiRepoURLsFromJSONUnparseable(t *testing.T) {
 		t.Errorf("unparseable: expected unparseable notice in stderr, got %q", w.String())
 	}
 }
+
+// TestPapiRepoURLsFromJSONSingleEntryFlakeURL: a single entry carrying
+// flake_url uses that value verbatim rather than deriving the git+https form.
+func TestPapiRepoURLsFromJSONSingleEntryFlakeURL(t *testing.T) {
+	data := []byte(`[{"name":"crap","url":"https://code.example.com/crap","flake_url":"https://code.example.com/crap/archive/master.tar.gz"}]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("single entry with flake_url: unexpected stderr: %q", w.String())
+	}
+	want := "https://code.example.com/crap/archive/master.tar.gz"
+	if got := m["crap"]; got != want {
+		t.Errorf("single entry with flake_url: m[\"crap\"] = %q, want %q", got, want)
+	}
+}
+
+// TestPapiRepoURLsFromJSONSingleEntryNoFlakeURL: a single entry without
+// flake_url falls back to the git+https derivation (rollout-order-independent).
+func TestPapiRepoURLsFromJSONSingleEntryNoFlakeURL(t *testing.T) {
+	data := []byte(`[{"name":"crap","url":"https://code.example.com/crap"}]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("single entry without flake_url: unexpected stderr: %q", w.String())
+	}
+	want := "git+https://code.example.com/crap.git"
+	if got := m["crap"]; got != want {
+		t.Errorf("single entry without flake_url: m[\"crap\"] = %q, want %q", got, want)
+	}
+}
+
+// TestPapiRepoURLsFromJSONDuplicateCanonicalFlakeURL: when a dual-homed entry
+// carries both canonical:true and flake_url on the canonical entry, flake_url
+// is used verbatim.
+func TestPapiRepoURLsFromJSONDuplicateCanonicalFlakeURL(t *testing.T) {
+	data := []byte(`[
+		{"name":"crap","url":"https://code.example.com/crap","canonical":true,"flake_url":"https://code.example.com/crap/archive/master.tar.gz"},
+		{"name":"crap","url":"https://github.com/owner/crap","canonical":false}
+	]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("canonical with flake_url: unexpected stderr: %q", w.String())
+	}
+	want := "https://code.example.com/crap/archive/master.tar.gz"
+	if got := m["crap"]; got != want {
+		t.Errorf("canonical with flake_url: m[\"crap\"] = %q, want %q", got, want)
+	}
+}
+
+// TestPapiRepoURLsFromJSONMixedFleet: two repos, one with flake_url
+// (post-upgrade server) and one without (pre-upgrade server). Each takes
+// whichever form is authoritative — the transition is order-independent.
+func TestPapiRepoURLsFromJSONMixedFleet(t *testing.T) {
+	data := []byte(`[
+		{"name":"new","url":"https://code.example.com/new","flake_url":"https://code.example.com/new/archive/master.tar.gz"},
+		{"name":"old","url":"https://code.example.com/old"}
+	]`)
+	var w bytes.Buffer
+	m := papiRepoURLsFromJSON("example.com", data, &w)
+	if w.Len() != 0 {
+		t.Errorf("mixed fleet: unexpected stderr: %q", w.String())
+	}
+	wantNew := "https://code.example.com/new/archive/master.tar.gz"
+	if got := m["new"]; got != wantNew {
+		t.Errorf("mixed fleet: m[\"new\"] = %q, want %q", got, wantNew)
+	}
+	wantOld := "git+https://code.example.com/old.git"
+	if got := m["old"]; got != wantOld {
+		t.Errorf("mixed fleet: m[\"old\"] = %q, want %q", got, wantOld)
+	}
+}
