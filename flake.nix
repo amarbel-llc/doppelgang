@@ -2,7 +2,7 @@
   description = "doppelgang: find duplicate packages in a Nix closure, sorted by wasted bytes";
 
   inputs = {
-    igloo.url = "git+https://code.linenisgreat.com/igloo.git";
+    igloo.url = "https://code.linenisgreat.com/igloo/archive/master.tar.gz";
     igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
     nixpkgs-master.url = "github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
@@ -12,7 +12,7 @@
     # library (conformist.lib), and the eng-convention presets. Consumed from
     # the forge (linenisgreat/conformist); no github: deferral applies.
     conformist = {
-      url = "git+https://code.linenisgreat.com/conformist.git";
+      url = "https://code.linenisgreat.com/conformist/archive/master.tar.gz";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
