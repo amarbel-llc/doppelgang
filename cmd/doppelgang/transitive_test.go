@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
 // transitivePipelineLock models root → tacky → bats, where bats declares only

@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
+	"code.linenisgreat.com/doppelgang/internal/alfa/dupes"
 )
 
 // Summary is the renderer input: scope label, totals, the duplicate

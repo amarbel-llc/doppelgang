@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
 
 // writeFlake writes flake.nix + flake.lock into a fresh temp dir and returns

@@ -9,8 +9,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/friedenberg/doppelgang/internal/0/closure"
-	"github.com/friedenberg/doppelgang/internal/0/storepath"
+	"code.linenisgreat.com/doppelgang/internal/0/closure"
+	"code.linenisgreat.com/doppelgang/internal/0/storepath"
 )
 
 // Compute does a forward BFS from each direct reference of root, in

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
 // Report is the result of analyzing a flake.lock.

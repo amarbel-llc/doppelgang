@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/0/closure"
+	"code.linenisgreat.com/doppelgang/internal/0/closure"
 )
 
 func TestComputeOwnersAcrossTopLevels(t *testing.T) {

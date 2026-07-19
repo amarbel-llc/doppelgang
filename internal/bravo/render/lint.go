@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/friedenberg/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
 
 // LintSummary is the renderer input for `doppelgang lint`: the flake.lock

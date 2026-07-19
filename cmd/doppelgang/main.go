@@ -13,14 +13,14 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/friedenberg/doppelgang/internal/0/closure"
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
-	"github.com/friedenberg/doppelgang/internal/0/nixedit"
-	"github.com/friedenberg/doppelgang/internal/0/storepath"
-	"github.com/friedenberg/doppelgang/internal/alfa/attribute"
-	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
-	"github.com/friedenberg/doppelgang/internal/alfa/lint"
-	"github.com/friedenberg/doppelgang/internal/bravo/render"
+	"code.linenisgreat.com/doppelgang/internal/0/closure"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/nixedit"
+	"code.linenisgreat.com/doppelgang/internal/0/storepath"
+	"code.linenisgreat.com/doppelgang/internal/alfa/attribute"
+	"code.linenisgreat.com/doppelgang/internal/alfa/dupes"
+	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/bravo/render"
 )
 
 // Populated at build time by the amarbel-llc/nixpkgs fork's buildGoApplication

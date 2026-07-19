@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/friedenberg/doppelgang/internal/alfa/dupes"
+	"code.linenisgreat.com/doppelgang/internal/alfa/dupes"
 )
 
 type jsonGroup struct {

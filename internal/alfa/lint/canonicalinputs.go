@@ -3,8 +3,8 @@ package lint
 import (
 	"sort"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
-	"github.com/friedenberg/doppelgang/internal/0/nixedit"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/nixedit"
 )
 
 // CanonicalInputFinding reports that a top-level flake input's URL does not

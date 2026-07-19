@@ -1,4 +1,4 @@
-module github.com/friedenberg/doppelgang
+module code.linenisgreat.com/doppelgang
 
 go 1.26
 

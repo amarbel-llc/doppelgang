@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
 // DeadOverride is a `follows` override that points at an input the targeted

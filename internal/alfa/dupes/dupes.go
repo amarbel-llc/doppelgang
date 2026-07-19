@@ -5,8 +5,8 @@ package dupes
 import (
 	"sort"
 
-	"github.com/friedenberg/doppelgang/internal/0/closure"
-	"github.com/friedenberg/doppelgang/internal/0/storepath"
+	"code.linenisgreat.com/doppelgang/internal/0/closure"
+	"code.linenisgreat.com/doppelgang/internal/0/storepath"
 )
 
 // Group is the set of closure paths sharing the same name. Only groups

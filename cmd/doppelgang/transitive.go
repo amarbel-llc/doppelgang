@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
-	"github.com/friedenberg/doppelgang/internal/0/nixedit"
-	"github.com/friedenberg/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/nixedit"
+	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
 
 // perFetchTimeout bounds each upstream flake.nix fetch so a slow or hanging

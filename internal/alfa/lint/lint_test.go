@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
 // synthLock: shared and shared_2 are the same source (narHash sha-s),

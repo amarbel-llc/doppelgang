@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
 
 // ndjsonRec decodes any record of the tap test-result NDJSON schema. Test

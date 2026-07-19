@@ -3,7 +3,7 @@ package lint
 import (
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/0/flakelock"
+	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
 // miniLock builds a minimal lock with a single root input for testing.

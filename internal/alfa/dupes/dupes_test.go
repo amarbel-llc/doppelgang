@@ -3,7 +3,7 @@ package dupes
 import (
 	"testing"
 
-	"github.com/friedenberg/doppelgang/internal/0/closure"
+	"code.linenisgreat.com/doppelgang/internal/0/closure"
 )
 
 func TestFindGroupsAndSortsByWasted(t *testing.T) {
