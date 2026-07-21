@@ -207,13 +207,20 @@ func renderBindings(lines []parsedLine, ins inputsAttrSet) (string, []string) {
 	return b.String(), applied
 }
 
+// spliceRange replaces the byte range [start, end) in src with replacement,
+// e.g. MigrateLegacySentinel's in-place comment-line rewrite. spliceAt (a
+// pure insertion, no deletion) is the special case start == end.
+func spliceRange(src []byte, start, end int, replacement string) []byte {
+	out := make([]byte, 0, len(src)-(end-start)+len(replacement))
+	out = append(out, src[:start]...)
+	out = append(out, replacement...)
+	out = append(out, src[end:]...)
+	return out
+}
+
 // spliceAt inserts ins at byte offset off in src.
 func spliceAt(src []byte, off int, ins string) []byte {
-	out := make([]byte, 0, len(src)+len(ins))
-	out = append(out, src[:off]...)
-	out = append(out, ins...)
-	out = append(out, src[off:]...)
-	return out
+	return spliceRange(src, off, off, ins)
 }
 
 // inputsAttrSet describes the located, editable `inputs` region and how

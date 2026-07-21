@@ -7,20 +7,34 @@ import (
 	langlang "github.com/clarete/langlang/go"
 )
 
-// CanonicalFormSentinel is the opt-in marker: a flake enables canonical-form
-// enforcement by placing this comment on its own line immediately above its
-// `inputs` binding (the `inputs = { … }` block, or the first `inputs.…`
-// binding in flat form). Absent the sentinel, CanonicalForm reports
-// Enabled=false and CanonicalFormFixTargets returns nothing to change —
-// mirroring FDR-0004's `# keep sorted` opt-in precedent so third-party
-// flakes are never re-shaped.
-const CanonicalFormSentinel = "# canonical-form"
+// CanonicalFormDirective is the directive name a flake places after the
+// `# doppelgang:` prefix (see directivePrefix) to opt into canonical-form
+// enforcement, e.g. `# doppelgang: canonical`, on its own line immediately
+// above its `inputs` binding (the `inputs = { … }` block, or the first
+// `inputs.…` binding in flat form). Absent the directive (in either this
+// structured form or the legacy canonicalFormLegacySentinel spelling),
+// CanonicalForm reports Enabled=false and CanonicalFormFixTargets returns
+// nothing to change — mirroring FDR-0004's `# keep sorted` opt-in precedent
+// so third-party flakes are never re-shaped.
+const CanonicalFormDirective = "canonical"
+
+// canonicalFormLegacySentinel is the opt-in spelling this package used
+// before the structured `# doppelgang: <directive>` convention. Still
+// recognized for Enabled so already-opted-in flakes keep working; --fix
+// rewrites it to the structured form via MigrateLegacySentinel.
+const canonicalFormLegacySentinel = "# canonical-form"
 
 // CanonicalFormReport is the result of scanning a flake.nix's top-level
 // `inputs` attribute set for canonical-form violations.
 type CanonicalFormReport struct {
-	// Enabled reports whether the flake opted in via CanonicalFormSentinel.
+	// Enabled reports whether the flake opted in, via either the
+	// structured `# doppelgang: canonical` directive or the legacy
+	// `# canonical-form` sentinel.
 	Enabled bool
+	// LegacySentinel reports whether the opt-in used the legacy
+	// `# canonical-form` spelling rather than the structured directive.
+	// Populated only when Enabled is true.
+	LegacySentinel bool
 	// Scattered lists, in first-appearance order, the names of inputs
 	// whose bindings are not contiguous under `inputs` — i.e. some other
 	// input's binding appears between two bindings belonging to the same
@@ -33,14 +47,43 @@ type CanonicalFormReport struct {
 // to act on a disabled report (present for completeness/debugging); lint's
 // check and --fix both skip flakes where Enabled is false.
 func CanonicalForm(src []byte) (CanonicalFormReport, error) {
-	enabled, order, err := analyzeCanonicalForm(src)
+	scan, err := analyzeCanonicalForm(src, true)
 	if err != nil {
 		return CanonicalFormReport{}, err
 	}
-	if !enabled {
+	if !scan.enabled {
 		return CanonicalFormReport{}, nil
 	}
-	return CanonicalFormReport{Enabled: enabled, Scattered: scatteredNames(order)}, nil
+	return CanonicalFormReport{Enabled: scan.enabled, LegacySentinel: scan.legacy, Scattered: scatteredNames(scan.order)}, nil
+}
+
+// MigrateLegacySentinel rewrites a legacy `# canonical-form` opt-in comment
+// to the structured `# doppelgang: canonical` directive, in place,
+// preserving the line's indentation. Returns src unchanged (changed=false)
+// when no legacy sentinel is present — including when the flake has not
+// opted in at all, or already uses the structured directive.
+func MigrateLegacySentinel(src []byte) (out []byte, changed bool, err error) {
+	// wantOrder=false: this rewrite only needs bindingStart/legacy, not the
+	// binding-order walk (which, in block form, costs a second grammar
+	// parse of the inputs group) — skipping it avoids paying for work the
+	// caller discards.
+	scan, err := analyzeCanonicalForm(src, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if !scan.legacy {
+		return src, false, nil
+	}
+	lineStartOff := lineStart(src, scan.bindingStart)
+	prevLineEnd := lineStartOff - 1 // the '\n' terminating the sentinel's line
+	prevLineStart := lineStart(src, prevLineEnd)
+	// lineIndent measures whitespace between a line's start and the given
+	// offset, so it needs an offset past the indent — prevLineEnd (the
+	// line's last byte) rather than prevLineStart (which IS the indent's
+	// start, yielding an empty measurement).
+	indent := lineIndent(src, prevLineEnd)
+	out = spliceRange(src, prevLineStart, prevLineEnd, indent+"# "+directivePrefix+" "+CanonicalFormDirective)
+	return out, true, nil
 }
 
 // CanonicalFormFixTargets computes what --fix needs to relocate a scattered
@@ -54,21 +97,21 @@ func CanonicalForm(src []byte) (CanonicalFormReport, error) {
 // nested sub-attrset is left where it is. Chunk-internal placement (moving a
 // follows inside an existing nested `X = { … }` block) and alphabetical
 // chunk ordering are not attempted by this pass — see FDR 0007. Returns
-// nothing to change when the flake has not opted in (CanonicalFormSentinel
-// absent) or has no scattered inputs.
+// nothing to change when the flake has not opted in (neither opt-in spelling
+// present) or has no scattered inputs.
 func CanonicalFormFixTargets(src []byte) (deleteTargets, reapplyLines []string, err error) {
-	enabled, order, err := analyzeCanonicalForm(src)
+	scan, err := analyzeCanonicalForm(src, true)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !enabled {
+	if !scan.enabled {
 		return nil, nil, nil
 	}
 	scattered := map[string]bool{}
-	for _, name := range scatteredNames(order) {
+	for _, name := range scatteredNames(scan.order) {
 		scattered[name] = true
 	}
-	for _, b := range order {
+	for _, b := range scan.order {
 		if b.followsPath == "" || !scattered[b.input] {
 			continue
 		}
@@ -88,28 +131,49 @@ type inputBinding struct {
 	followsRHS  string // set only alongside followsPath
 }
 
-// analyzeCanonicalForm parses src and returns whether it opts into
-// canonical-form enforcement plus the in-file-order sequence of bindings
-// directly under `inputs`, uniformly across block and flat form.
-func analyzeCanonicalForm(src []byte) (enabled bool, order []inputBinding, err error) {
+// canonicalFormScan is what analyzeCanonicalForm's callers need, named
+// rather than positional so each caller's `scan.foo` reads self-documented
+// instead of a run of blank-discarded positionals.
+type canonicalFormScan struct {
+	// enabled and legacy are canonicalFormOptIn's result for the governing
+	// `inputs` binding's preceding line.
+	enabled, legacy bool
+	// bindingStart is the byte offset of that `inputs` binding — the
+	// anchor MigrateLegacySentinel walks backward from to find the opt-in
+	// comment's line.
+	bindingStart int
+	// order is the in-file-order sequence of bindings directly under
+	// `inputs`, uniformly across block and flat form. Left nil when the
+	// caller passed wantOrder=false to analyzeCanonicalForm.
+	order []inputBinding
+}
+
+// analyzeCanonicalForm parses src and reports its canonical-form opt-in
+// status. When wantOrder is true it additionally walks the in-file-order
+// sequence of bindings directly under `inputs` — in block form this costs a
+// second grammar parse of the group's text (blockBindingOrder), so callers
+// that only need the opt-in status (MigrateLegacySentinel) pass false to
+// skip work they'd otherwise discard.
+func analyzeCanonicalForm(src []byte, wantOrder bool) (canonicalFormScan, error) {
 	matcher, err := newMatcher()
 	if err != nil {
-		return false, nil, fmt.Errorf("nixedit: compile grammar: %w", err)
+		return canonicalFormScan{}, fmt.Errorf("nixedit: compile grammar: %w", err)
 	}
 	tree, _, err := matcher.Match(src)
 	if err != nil {
-		return false, nil, fmt.Errorf("%w: %v", ErrUnparseable, err)
+		return canonicalFormScan{}, fmt.Errorf("%w: %v", ErrUnparseable, err)
 	}
 	root, ok := tree.Root()
 	if !ok {
-		return false, nil, ErrUnparseable
+		return canonicalFormScan{}, ErrUnparseable
 	}
 	seq, ok := topAttrSetSequence(tree, root)
 	if !ok {
-		return false, nil, ErrUnparseable
+		return canonicalFormScan{}, ErrUnparseable
 	}
 
 	var (
+		scan       canonicalFormScan
 		haveEnable bool
 		blockGroup langlang.NodeID
 		haveBlock  bool
@@ -127,7 +191,8 @@ func analyzeCanonicalForm(src []byte) (enabled bool, order []inputBinding, err e
 			continue
 		}
 		if !haveEnable {
-			enabled = precedingLineIsSentinel(src, tree.Span(child).Start.Cursor)
+			scan.bindingStart = tree.Span(child).Start.Cursor
+			scan.enabled, scan.legacy = canonicalFormOptIn(src, scan.bindingStart)
 			haveEnable = true
 		}
 		if len(path) == 1 {
@@ -138,18 +203,40 @@ func analyzeCanonicalForm(src []byte) (enabled bool, order []inputBinding, err e
 			}
 			continue
 		}
+		if !wantOrder {
+			continue
+		}
 		// Flat form: `inputs.<x>… = …`. Strip the leading "inputs" segment
 		// so the path is relative like block form's, and share its
 		// per-binding conversion.
-		order = append(order, bindingFromRelPath(path[1:], val, tree))
+		scan.order = append(scan.order, bindingFromRelPath(path[1:], val, tree))
 	}
-	if haveBlock {
+	if haveBlock && wantOrder {
 		// groupBlock's text is read from the still-valid outer tree before
 		// blockBindingOrder re-parses it (invalidating node IDs) — same
 		// ordering hazard documented in blockChunkOffsets.
-		order = blockBindingOrder(matcher, []byte(tree.Text(blockGroup)))
+		scan.order = blockBindingOrder(matcher, []byte(tree.Text(blockGroup)))
 	}
-	return enabled, order, nil
+	return scan, nil
+}
+
+// canonicalFormOptIn reports whether the line immediately above byte offset
+// off opts a flake into canonical-form enforcement — either the structured
+// `# doppelgang: canonical` directive or the legacy `# canonical-form`
+// sentinel (legacy=true in that case, so callers know MigrateLegacySentinel
+// has something to rewrite).
+func canonicalFormOptIn(src []byte, off int) (enabled, legacy bool) {
+	line, ok := precedingLine(src, off)
+	if !ok {
+		return false, false
+	}
+	if line == canonicalFormLegacySentinel {
+		return true, true
+	}
+	if name, dOK := parseDirective(line); dOK && name == CanonicalFormDirective {
+		return true, false
+	}
+	return false, false
 }
 
 // blockBindingOrder re-parses an `inputs = { … }` block's content and
@@ -222,17 +309,4 @@ func scatteredNames(order []inputBinding) []string {
 		}
 	}
 	return scattered
-}
-
-// precedingLineIsSentinel reports whether the line immediately before the
-// line containing byte offset off is exactly CanonicalFormSentinel (leading/
-// trailing whitespace tolerated).
-func precedingLineIsSentinel(src []byte, off int) bool {
-	curLineStart := lineStart(src, off)
-	if curLineStart == 0 {
-		return false
-	}
-	prevLineEnd := curLineStart - 1 // the '\n' terminating the previous line
-	prevLineStart := lineStart(src, prevLineEnd)
-	return strings.TrimSpace(string(src[prevLineStart:prevLineEnd])) == CanonicalFormSentinel
 }

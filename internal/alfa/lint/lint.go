@@ -34,10 +34,12 @@ type Report struct {
 	// plus a live papi call; Analyze leaves it nil. See CheckCanonicalInputs.
 	CanonicalInputs []CanonicalInputFinding
 	// CanonicalForm is non-nil when the flake has opted into canonical-form
-	// enforcement (a `# canonical-form` sentinel above its `inputs` binding)
-	// and has inputs whose bindings are not contiguous. It is computed from
-	// flake.nix alone (not the lock); a flake that has not opted in, or one
-	// that has and is already canonical, leaves it nil — and Analyze, which
+	// enforcement (a `# doppelgang: canonical` directive, or the deprecated
+	// `# canonical-form` sentinel, above its `inputs` binding) and either has
+	// inputs whose bindings are not contiguous or still uses the deprecated
+	// spelling. It is computed from flake.nix alone (not the lock); a flake
+	// that has not opted in, or one that has and is fully canonical (new
+	// spelling, no scattering), leaves it nil — and Analyze, which
 	// never runs this check, always leaves it nil. See CheckCanonicalForm.
 	CanonicalForm *CanonicalFormFinding
 }

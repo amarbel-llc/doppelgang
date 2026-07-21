@@ -48,17 +48,24 @@ that produces and enforces a canonical layout (tier 2, opt-in).
 These were supplied by the coordinating session for doppelgang#24 and are
 recorded here rather than re-derived:
 
-- **Opt-in per flake, via sentinel.** Following the FDR-0004 (`# keep
-  sorted`) precedent, canonical-form enforcement is opt-in per flake via a
-  marker comment: **`# canonical-form`**, placed on its own line
-  immediately above the `inputs = { ... }` (or `inputs.` flat block)
-  binding. Absent the sentinel, `canonical-inputs` reports nothing for
-  layout and `--fix` does not re-shape the block — only the tier-1
-  location-preserving behavior (which is not a layout-imposition, just a
-  smarter insertion point) applies unconditionally. Third-party flakes are
-  never re-shaped since they cannot carry the sentinel; eng's own
-  `flake.nix` opts in later, tracked by eng#52 — this change does not
-  touch eng.
+- **Opt-in per flake, via a structured directive comment.** Following the
+  FDR-0004 (`# keep sorted`) precedent, canonical-form enforcement is
+  opt-in per flake via a marker comment placed on its own line immediately
+  above the `inputs = { ... }` (or `inputs.` flat block) binding. The
+  shipped spelling is **`# doppelgang: canonical`** — a structured,
+  namespaced directive (`# doppelgang: <name>`) rather than a bespoke
+  string per check, so a future check (e.g. an eventual FDR-0004
+  implementation) can reuse the same `# doppelgang: <name>` convention
+  instead of inventing its own. This was a refinement made mid-session,
+  after initial implementation shipped with a bespoke `# canonical-form`
+  sentinel; that spelling is kept working as a deprecated alias (see
+  "Legacy sentinel migration" below) rather than being a breaking change.
+  Absent either spelling, the check reports nothing for layout and `--fix`
+  does not re-shape the block — only the tier-1 location-preserving
+  behavior (which is not a layout-imposition, just a smarter insertion
+  point) applies unconditionally. Third-party flakes are never re-shaped
+  since they cannot carry the directive; eng's own `flake.nix` opts in
+  later, tracked by eng#52 — this change does not touch eng.
 - **Nested vs. flat spelling is a per-chunk rule, not a block-wide one.**
   An input already expressed as a nested sub-attrset (`X = { url = ...;
   inputs.Y.follows = "Z"; }`) keeps that nested spelling; an input with no
@@ -150,16 +157,24 @@ Given an `inputs` block that opts in via `# canonical-form`:
 - **Check.** New `internal/alfa/lint` check, `CheckCanonicalForm =
   "canonical-form"`, added to `AllChecks` (opt-in like `nixpkgs-master`
   and `canonical-inputs` — not in `DefaultChecks`). `nixedit.CanonicalForm`
-  detects the `# canonical-form` sentinel (a comment reading exactly
-  that, alone on the line immediately above the `inputs` binding); a
-  flake without it produces no findings at all (not even "you should opt
-  in" — silence, matching the `# keep sorted` precedent). For an
-  opted-in flake, it walks the direct bindings under `inputs` (or, in
-  block form, under the `inputs = { … }` group) in file order and flags
-  any input name whose occurrences are not *contiguous* — i.e. some
-  other input's binding appears between two of its own. This is
-  definition (1)'s core invariant (no interleaving) without the
-  comment-attribution refinement.
+  detects the opt-in directive (a comment reading exactly `# doppelgang:
+  canonical`, or the deprecated `# canonical-form` spelling, alone on the
+  line immediately above the `inputs` binding); a flake with neither
+  produces no findings at all (not even "you should opt in" — silence,
+  matching the `# keep sorted` precedent). For an opted-in flake, it walks
+  the direct bindings under `inputs` (or, in block form, under the `inputs
+  = { … }` group) in file order and flags any input name whose occurrences
+  are not *contiguous* — i.e. some other input's binding appears between
+  two of its own. This is definition (1)'s core invariant (no
+  interleaving) without the comment-attribution refinement.
+- **Legacy sentinel migration.** A flake opted in via the deprecated
+  `# canonical-form` spelling is still recognized (`CanonicalFormReport.
+  LegacySentinel = true`) — the check surfaces this as a finding even when
+  nothing is scattered, since there's something actionable — and `--fix`
+  rewrites the comment line in place to `# doppelgang: canonical`
+  (`nixedit.MigrateLegacySentinel`), independent of whether there was any
+  scattering to relocate. No flake is left permanently unable to reach the
+  fixed point solely because it used the old spelling.
 - **`--fix`.** `nixedit.CanonicalFormFixTargets` identifies, among the
   scattered inputs, which of their bindings are themselves
   follows/override bindings (the only kind `Apply`/`DeleteBindings` can
@@ -215,8 +230,10 @@ criteria).
 
 ## eng#52 (input to)
 
-The sentinel an eng-side consumer opts in with is **`# canonical-form`**,
-placed on the line immediately above the `inputs` binding it governs. eng
-itself does not opt in as part of this change — that is deferred, per the
-working decision above, to a follow-up once this ships and the codemod has
-been exercised on other flakes first.
+The directive an eng-side consumer opts in with is **`# doppelgang:
+canonical`**, placed on the line immediately above the `inputs` binding it
+governs. (The deprecated `# canonical-form` sentinel also still works, and
+`--fix` migrates it — but a new adopter should use the structured form
+directly.) eng itself does not opt in as part of this change — that is
+deferred, per the working decision above, to a follow-up once this ships and
+the codemod has been exercised on other flakes first.

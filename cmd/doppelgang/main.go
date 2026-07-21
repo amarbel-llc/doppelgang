@@ -509,10 +509,12 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 // dead-overrides check is selected, the nixpkgs-master pin only when the
 // nixpkgs-master check is selected, canonical-input URL rewrites only when
 // the canonical-inputs check is selected, and scattered-follows relocation
-// only when the canonical-form check is selected (and the flake has opted in
-// via its `# canonical-form` sentinel — see FDR 0007). A deselected check is
-// neither applied nor counted toward the report-only accounting or the exit
-// code.
+// (plus, independently, sentinel migration) only when the canonical-form
+// check is selected and the flake has opted in — via its structured
+// `# doppelgang: canonical` directive or the deprecated `# canonical-form`
+// sentinel, which --fix rewrites to the structured form — see FDR 0007. A
+// deselected check is neither applied nor counted toward the report-only
+// accounting or the exit code.
 //
 // Locking policy: the follows-collapse and dead-override prunes are
 // re-locked (`nix flake lock`) here because they rewrite the lock graph the
@@ -610,6 +612,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	}
 
 	var canonicalFormApplied []string
+	var canonicalFormMigrated bool
 	if fixCanonicalForm {
 		var deleteTargets, reapplyLines []string
 		deleteTargets, reapplyLines, err = nixedit.CanonicalFormFixTargets(out)
@@ -632,6 +635,17 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 				return canonicalFormFailed(err)
 			}
 		}
+		// Migrate a legacy `# canonical-form` sentinel to the structured
+		// `# doppelgang: canonical` directive regardless of whether there
+		// was anything to relocate above — the old spelling still opts a
+		// flake in (back-compat), but --fix always upgrades it going
+		// forward.
+		out, canonicalFormMigrated, err = nixedit.MigrateLegacySentinel(out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not migrate the canonical-form sentinel in %s automatically (%v).\n"+
+				"Rewrite the `# canonical-form` comment to `# doppelgang: canonical` by hand.\n", nixPath, err)
+			return 1
+		}
 	}
 
 	// Follows and dead-override edits rewrite the lock graph, so they trigger
@@ -640,7 +654,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// resolves to — canonical-form relocation moves a follows binding without
 	// changing its target).
 	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
-	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0 || len(canonicalFormApplied) > 0
+	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0 || len(canonicalFormApplied) > 0 || canonicalFormMigrated
 
 	if !flakeNixChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
@@ -669,6 +683,9 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			for _, l := range canonicalFormApplied {
 				fmt.Fprintf(os.Stderr, "    %s\n", l)
 			}
+		}
+		if canonicalFormMigrated {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: migrated the canonical-form sentinel in %s from `# canonical-form` to `# doppelgang: canonical`\n", nixPath)
 		}
 		// Re-lock only for lock-affecting edits. nixpkgs-master and
 		// canonical-inputs edits leave lock materialization to the caller
@@ -727,7 +744,8 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		return 1
 	}
 	if sel.Has(lint.CheckCanonicalForm) && after.CanonicalForm != nil {
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: canonical-form violations remain after fix (scattered: %v); re-run lint for detail\n", after.CanonicalForm.Scattered)
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: canonical-form issues remain after fix (scattered: %v, legacy sentinel: %v); re-run lint for detail\n",
+			after.CanonicalForm.Scattered, after.CanonicalForm.LegacySentinel)
 		return 1
 	}
 	return 0

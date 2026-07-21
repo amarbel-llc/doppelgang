@@ -521,6 +521,43 @@ func lineIndent(src []byte, off int) string {
 	return string(src[start:i])
 }
 
+// precedingLine returns the trimmed text of the line immediately before the
+// line containing byte offset off, or ("", false) when off is on the
+// file's first line (no preceding line to read).
+func precedingLine(src []byte, off int) (string, bool) {
+	curLineStart := lineStart(src, off)
+	if curLineStart == 0 {
+		return "", false
+	}
+	prevLineEnd := curLineStart - 1 // the '\n' terminating the previous line
+	prevLineStart := lineStart(src, prevLineEnd)
+	return strings.TrimSpace(string(src[prevLineStart:prevLineEnd])), true
+}
+
+// directivePrefix namespaces a doppelgang opt-in directive comment:
+// `# doppelgang: <name>`, one per line, placed immediately above the
+// construct it governs (e.g. an `inputs` binding). canonical-form is
+// currently the only consumer; FDR-0004's `# keep sorted` is still a
+// bespoke sentinel in its own design doc, not this convention — if it
+// (or another opt-in check) later adopts `# doppelgang: <name>` too, this
+// parser is ready to be its second consumer, but that hasn't happened yet.
+const directivePrefix = "doppelgang:"
+
+// parseDirective extracts the directive name from an already-trimmed
+// comment line, e.g. "# doppelgang: canonical" -> ("canonical", true).
+// Returns ("", false) when line is not a directivePrefix comment.
+func parseDirective(line string) (string, bool) {
+	if !strings.HasPrefix(line, "#") {
+		return "", false
+	}
+	body := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+	name, ok := strings.CutPrefix(body, directivePrefix)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(name), true
+}
+
 // afterSemicolon advances off past an immediately-following ';' (skipping
 // intervening whitespace, including newlines), so a flat-binding insert
 // lands after the last binding's terminator even when the ';' is written

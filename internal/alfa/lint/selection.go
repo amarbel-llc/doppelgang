@@ -33,10 +33,11 @@ var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, Che
 // --papi-domain parameter. All three are opt-in via `--checks nixpkgs-master`
 // / `--checks canonical-inputs` / `--checks canonical-form` (or the `all`
 // alias); canonical-form additionally requires the flake itself to carry a
-// `# canonical-form` sentinel comment (see FDR 0007) — selecting the check
-// without the sentinel present yields no findings. Keeping the default at
-// three also preserves the pre-existing exit-code, output, and NDJSON
-// plan-count behavior for every existing consumer.
+// `# doppelgang: canonical` directive comment (the deprecated `# canonical-
+// form` spelling still works too, and `--fix` upgrades it — see FDR 0007) —
+// selecting the check without either spelling present yields no findings.
+// Keeping the default at three also preserves the pre-existing exit-code,
+// output, and NDJSON plan-count behavior for every existing consumer.
 var DefaultChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides}
 
 // Selection is the set of enabled checks. The zero value (nil) enables

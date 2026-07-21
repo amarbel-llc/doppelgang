@@ -130,13 +130,20 @@ func LintText(w io.Writer, s LintSummary) error {
 			return err
 		}
 		if s.Report.CanonicalForm == nil {
-			if _, err := fmt.Fprintln(w, "(not opted in via `# canonical-form`, or every input's bindings are contiguous)"); err != nil {
+			if _, err := fmt.Fprintln(w, "(not opted in via `# doppelgang: canonical`, or every input's bindings are contiguous)"); err != nil {
 				return err
 			}
 		} else {
-			if _, err := fmt.Fprintf(w, "scattered inputs (bindings not contiguous): %s\n",
-				truncList(s.Report.CanonicalForm.Scattered, 8)); err != nil {
-				return err
+			if len(s.Report.CanonicalForm.Scattered) > 0 {
+				if _, err := fmt.Fprintf(w, "scattered inputs (bindings not contiguous): %s\n",
+					truncList(s.Report.CanonicalForm.Scattered, 8)); err != nil {
+					return err
+				}
+			}
+			if s.Report.CanonicalForm.LegacySentinel {
+				if _, err := fmt.Fprintln(w, "using deprecated `# canonical-form` sentinel; `--fix` rewrites it to `# doppelgang: canonical`"); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -216,10 +223,12 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		CanonicalURL string `json:"canonicalURL"`
 	}
 	type jsonCanonicalForm struct {
-		// Canonical is true when every input's bindings are contiguous (or
-		// the flake has not opted in — see LintText's identical framing).
-		Canonical bool     `json:"canonical"`
-		Scattered []string `json:"scattered,omitempty"`
+		// Canonical is true when every input's bindings are contiguous and
+		// the flake already uses the structured directive (or has not
+		// opted in — see LintText's identical framing).
+		Canonical      bool     `json:"canonical"`
+		Scattered      []string `json:"scattered,omitempty"`
+		LegacySentinel bool     `json:"legacySentinel,omitempty"`
 	}
 	// Pointer fields with omitempty so a *deselected* check is absent from
 	// the document (nil pointer omitted), while a *selected* check with no
@@ -286,6 +295,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		cf := &jsonCanonicalForm{Canonical: s.Report.CanonicalForm == nil}
 		if s.Report.CanonicalForm != nil {
 			cf.Scattered = s.Report.CanonicalForm.Scattered
+			cf.LegacySentinel = s.Report.CanonicalForm.LegacySentinel
 		}
 		out.CanonicalForm = cf
 	}
@@ -373,7 +383,8 @@ type ndjsonCanonicalInputDiag struct {
 }
 
 type ndjsonCanonicalFormDiag struct {
-	Scattered []string `json:"scattered"`
+	Scattered      []string `json:"scattered"`
+	LegacySentinel bool     `json:"legacySentinel"`
 }
 
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
@@ -481,12 +492,21 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		OK:          s.Report.CanonicalForm == nil,
 	}
 	if f := s.Report.CanonicalForm; f != nil {
+		var desc string
+		switch {
+		case len(f.Scattered) > 0 && f.LegacySentinel:
+			desc = fmt.Sprintf("scattered inputs: %s (also using deprecated `# canonical-form` sentinel)", truncList(f.Scattered, 8))
+		case len(f.Scattered) > 0:
+			desc = fmt.Sprintf("scattered inputs: %s", truncList(f.Scattered, 8))
+		default: // f.LegacySentinel alone — the only other way this finding is non-nil.
+			desc = "using deprecated `# canonical-form` sentinel"
+		}
 		canonicalForm.Subtest = append(canonicalForm.Subtest, ndjsonTest{
 			Type:        "test",
 			N:           1,
-			Description: fmt.Sprintf("scattered inputs: %s", truncList(f.Scattered, 8)),
+			Description: desc,
 			OK:          false,
-			Diagnostic:  ndjsonCanonicalFormDiag{Scattered: f.Scattered},
+			Diagnostic:  ndjsonCanonicalFormDiag{Scattered: f.Scattered, LegacySentinel: f.LegacySentinel},
 		})
 	}
 

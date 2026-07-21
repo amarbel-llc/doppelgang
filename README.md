@@ -65,11 +65,14 @@ check:
   inputs whose bindings (`url`, `follows`/overrides, nested sub-attrset) are
   not contiguous under the top-level `inputs` attrset — i.e. some other
   input's binding is interleaved between two of theirs. Only runs on a flake
-  that carries a `# canonical-form` comment on the line immediately above its
-  `inputs` binding; a flake without that sentinel is never flagged or
-  reshaped. `--fix` relocates a scattered input's follows/override bindings
-  adjacent to its remaining bindings (see below). Selected via `--checks
-  canonical-form` (or `all`). Detection reads `flake.nix` alone. See
+  that carries a `# doppelgang: canonical` directive comment on the line
+  immediately above its `inputs` binding (the deprecated `# canonical-form`
+  spelling still opts in too, and `--fix` upgrades it to the structured form);
+  a flake with neither is never flagged or reshaped. `--fix` relocates a
+  scattered input's follows/override bindings adjacent to its remaining
+  bindings, and migrates a deprecated sentinel to the structured directive
+  (see below). Selected via `--checks canonical-form` (or `all`). Detection
+  reads `flake.nix` alone. See
   `docs/features/0007-canonical-inputs-block.md`.
 
 The follows / multi-version analyses are entirely offline. Dead-override
