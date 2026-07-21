@@ -125,6 +125,22 @@ func LintText(w io.Writer, s LintSummary) error {
 		}
 	}
 
+	if s.active(lint.CheckCanonicalForm) {
+		if _, err := fmt.Fprintf(w, "\n── canonical inputs-block form ──\n"); err != nil {
+			return err
+		}
+		if s.Report.CanonicalForm == nil {
+			if _, err := fmt.Fprintln(w, "(not opted in via `# canonical-form`, or every input's bindings are contiguous)"); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(w, "scattered inputs (bindings not contiguous): %s\n",
+				truncList(s.Report.CanonicalForm.Scattered, 8)); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -199,6 +215,12 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		CurrentURL   string `json:"currentURL"`
 		CanonicalURL string `json:"canonicalURL"`
 	}
+	type jsonCanonicalForm struct {
+		// Canonical is true when every input's bindings are contiguous (or
+		// the flake has not opted in — see LintText's identical framing).
+		Canonical bool     `json:"canonical"`
+		Scattered []string `json:"scattered,omitempty"`
+	}
 	// Pointer fields with omitempty so a *deselected* check is absent from
 	// the document (nil pointer omitted), while a *selected* check with no
 	// findings still renders (an empty `[]` for the slice checks, or a
@@ -210,6 +232,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		DeadOverrides   *[]jsonDead           `json:"deadOverrides,omitempty"`
 		NixpkgsMaster   *jsonNixpkgsMaster    `json:"nixpkgsMaster,omitempty"`
 		CanonicalInputs *[]jsonCanonicalInput `json:"canonicalInputs,omitempty"`
+		CanonicalForm   *jsonCanonicalForm    `json:"canonicalForm,omitempty"`
 	}{}
 	if s.active(lint.CheckFollows) {
 		follows := make([]jsonFollows, 0, len(s.Report.Follows))
@@ -258,6 +281,13 @@ func LintJSON(w io.Writer, s LintSummary) error {
 			})
 		}
 		out.CanonicalInputs = &ci
+	}
+	if s.active(lint.CheckCanonicalForm) {
+		cf := &jsonCanonicalForm{Canonical: s.Report.CanonicalForm == nil}
+		if s.Report.CanonicalForm != nil {
+			cf.Scattered = s.Report.CanonicalForm.Scattered
+		}
+		out.CanonicalForm = cf
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -340,6 +370,10 @@ type ndjsonCanonicalInputDiag struct {
 	Input        string `json:"input"`
 	CurrentURL   string `json:"currentURL"`
 	CanonicalURL string `json:"canonicalURL"`
+}
+
+type ndjsonCanonicalFormDiag struct {
+	Scattered []string `json:"scattered"`
 }
 
 // LintNDJSON writes the lint summary as the amarbel-llc/tap test-result
@@ -441,6 +475,21 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		})
 	}
 
+	canonicalForm := ndjsonTest{
+		Type:        "test",
+		Description: "canonical inputs-block form",
+		OK:          s.Report.CanonicalForm == nil,
+	}
+	if f := s.Report.CanonicalForm; f != nil {
+		canonicalForm.Subtest = append(canonicalForm.Subtest, ndjsonTest{
+			Type:        "test",
+			N:           1,
+			Description: fmt.Sprintf("scattered inputs: %s", truncList(f.Scattered, 8)),
+			OK:          false,
+			Diagnostic:  ndjsonCanonicalFormDiag{Scattered: f.Scattered},
+		})
+	}
+
 	// Only the selected checks become top-level test points, renumbered
 	// 1..k in canonical order so the plan count and the N fields agree with
 	// the selection (rather than the fixed set).
@@ -450,6 +499,7 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		lint.CheckDeadOverrides:   dead,
 		lint.CheckNixpkgsMaster:   nixpkgsMaster,
 		lint.CheckCanonicalInputs: canonicalInputs,
+		lint.CheckCanonicalForm:   canonicalForm,
 	}
 	var checks []ndjsonTest
 	for _, c := range lint.AllChecks {

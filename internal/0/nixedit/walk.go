@@ -58,7 +58,12 @@ func newMatcher() (langlang.Matcher, error) {
 // Mixing the two at one level is a Nix error, so exactly one shape
 // applies. Returns ok=false when neither is found, so the caller falls
 // back to print-only.
-func findInputsAttrSet(tree langlang.Tree, src []byte) (inputsAttrSet, bool) {
+//
+// matcher is passed through to blockInsert so it can re-parse the block's
+// inner content to compute per-input chunk offsets. After this call returns,
+// matcher may have been used for a sub-parse and the caller's tree node IDs
+// are stale — do not use tree after calling findInputsAttrSet.
+func findInputsAttrSet(tree langlang.Tree, src []byte, matcher langlang.Matcher) (inputsAttrSet, bool) {
 	root, ok := tree.Root()
 	if !ok {
 		return inputsAttrSet{}, false
@@ -70,11 +75,12 @@ func findInputsAttrSet(tree langlang.Tree, src []byte) (inputsAttrSet, bool) {
 
 	existing := map[string]bool{}
 	var (
-		blockGroup  langlang.NodeID
-		haveBlock   bool
-		lastFlatKey langlang.NodeID // the KeyVal of the last inputs.* flat binding
-		haveFlat    bool
-		flatIndent  string
+		blockGroup   langlang.NodeID
+		haveBlock    bool
+		lastFlatKey  langlang.NodeID // the KeyVal of the last inputs.* flat binding
+		haveFlat     bool
+		flatIndent   string
+		flatChunkEnd map[string]int // input name → abs offset after its last flat binding
 	)
 
 	for _, child := range tree.Children(seq) {
@@ -102,11 +108,18 @@ func findInputsAttrSet(tree langlang.Tree, src []byte) (inputsAttrSet, bool) {
 		lastFlatKey = kv
 		haveFlat = true
 		flatIndent = lineIndent(src, tree.Span(child).Start.Cursor)
+		// Track per-input last-binding position for location-preserving splice.
+		if len(path) >= 2 {
+			if flatChunkEnd == nil {
+				flatChunkEnd = map[string]int{}
+			}
+			flatChunkEnd[path[1]] = afterSemicolon(src, tree.Span(kv).End.Cursor)
+		}
 	}
 
 	switch {
 	case haveBlock:
-		return blockInsert(tree, src, blockGroup)
+		return blockInsert(tree, src, blockGroup, matcher)
 	case haveFlat:
 		// Insert after the last flat binding's terminating ';' (which sits
 		// just past the KeyVal span). The caller writes a leading newline +
@@ -118,6 +131,7 @@ func findInputsAttrSet(tree langlang.Tree, src []byte) (inputsAttrSet, bool) {
 			indent:       flatIndent,
 			blockMode:    false,
 			leadNewline:  true,
+			chunkEnd:     flatChunkEnd,
 		}, true
 	default:
 		// No editable `inputs` (block or flat) found — bail to print-only.
@@ -126,11 +140,18 @@ func findInputsAttrSet(tree langlang.Tree, src []byte) (inputsAttrSet, bool) {
 }
 
 // blockInsert computes the splice point inside a block-form `inputs = {
-// … }` attrset: just before its closing brace. Existing inner binding
-// keys are recovered from the group's opaque text (the shallow grammar
-// does not parse them structurally) and normalized to the full
-// `inputs.`-prefixed form for idempotency comparison.
-func blockInsert(tree langlang.Tree, src []byte, group langlang.NodeID) (inputsAttrSet, bool) {
+// … }` attrset: just before its closing brace (the global fallback), plus
+// per-input chunk offsets for location-preserving splice.
+//
+// Existing inner binding keys are recovered from the group's opaque text
+// (via scanBlockKeys) and normalized to the full `inputs.`-prefixed form
+// for idempotency comparison.
+//
+// matcher is used to re-parse the group's content to compute per-input
+// chunk offsets (blockChunkOffsets). This re-parse invalidates the node
+// IDs of the outer `tree`, so callers must not use `tree` after this call
+// returns.
+func blockInsert(tree langlang.Tree, src []byte, group langlang.NodeID, matcher langlang.Matcher) (inputsAttrSet, bool) {
 	var (
 		brace    langlang.NodeID
 		haveCl   bool
@@ -162,10 +183,17 @@ func blockInsert(tree langlang.Tree, src []byte, group langlang.NodeID) (inputsA
 		existing["inputs."+key] = true
 	}
 
+	// Extract group text and base offset before calling blockChunkOffsets:
+	// that re-parse invalidates the current tree's node IDs, so all tree
+	// navigation must be complete first.
+	groupBase := tree.Span(group).Start.Cursor
+	groupText := []byte(tree.Text(group))
+
 	ins := inputsAttrSet{
 		existing:  existing,
 		indent:    braceIndent + "  ", // one level deeper than the brace
 		blockMode: true,
+		chunkEnd:  blockChunkOffsets(matcher, groupText, groupBase),
 	}
 
 	if onlyBlankBefore(src, closeOff) {
@@ -183,6 +211,69 @@ func blockInsert(tree langlang.Tree, src []byte, group langlang.NodeID) (inputsA
 		ins.trailNewlineIndent = braceIndent
 	}
 	return ins, true
+}
+
+// blockChunkOffsets re-parses the content of an `inputs = { … }` block
+// and returns a map from each top-level input name to the absolute byte
+// offset in the original file immediately after the semicolon of that
+// input's last binding. This is the location-preserving splice point: new
+// follows bindings for input X are inserted there rather than at the
+// global block-end, keeping them adjacent to X's url, existing follows,
+// or nested sub-block.
+//
+// groupText is the full text of the Group node (including its surrounding
+// `{` and `}`), and base is its absolute start offset in the original
+// file. The returned offsets are absolute (base-relative) so they can be
+// used directly as splice points into the original source.
+//
+// Returns nil when the re-parse fails or the group has no bindings —
+// callers fall back to the global insertOffset in that case.
+func blockChunkOffsets(matcher langlang.Matcher, groupText []byte, base int) map[string]int {
+	tree, seq, ok := reparseGroupSequence(matcher, groupText)
+	if !ok {
+		return nil
+	}
+	chunkEnd := map[string]int{}
+	for _, child := range tree.Children(seq) {
+		if nodeName(tree, child) != "Binding" {
+			continue
+		}
+		kv, ok := bindingKeyVal(tree, child)
+		if !ok {
+			continue
+		}
+		path, _, ok := keyValPath(tree, kv, groupText)
+		if !ok || len(path) == 0 {
+			continue
+		}
+		inputName := path[0]
+		kvEnd := tree.Span(kv).End.Cursor
+		chunkEnd[inputName] = base + afterSemicolon(groupText, kvEnd)
+	}
+	if len(chunkEnd) == 0 {
+		return nil
+	}
+	return chunkEnd
+}
+
+// reparseGroupSequence re-parses groupText — the text of an `inputs = { … }`
+// group, re-parsed in isolation as its own file — and returns its top-level
+// Binding sequence. ok is false when the re-parse or either structural
+// lookup fails, in which case callers fall back to whatever "nothing found"
+// behavior fits their caller (nil map, nil slice, ...). Shared by every
+// caller that needs to walk such a group's direct bindings a second time
+// (blockChunkOffsets here; canonical.go's blockBindingOrder).
+func reparseGroupSequence(matcher langlang.Matcher, groupText []byte) (tree langlang.Tree, seq langlang.NodeID, ok bool) {
+	tree, _, err := matcher.Match(groupText)
+	if err != nil {
+		return tree, 0, false
+	}
+	root, rootOK := tree.Root()
+	if !rootOK {
+		return tree, 0, false
+	}
+	seq, seqOK := topAttrSetSequence(tree, root)
+	return tree, seq, seqOK
 }
 
 // onlyBlankBefore reports whether everything between the start of off's

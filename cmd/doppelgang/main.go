@@ -301,7 +301,28 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 	if sel.Has(lint.CheckCanonicalInputs) {
 		report.CanonicalInputs = canonicalInputFindings(ctx, flakeDir, lock, papiDomain)
 	}
+	if sel.Has(lint.CheckCanonicalForm) {
+		report.CanonicalForm = canonicalFormFinding(flakeDir)
+	}
 	return report, nil
+}
+
+// canonicalFormFinding reads <flakeDir>/flake.nix and classifies its
+// canonical-form opt-in and inputs-block contiguity, returning a finding (or
+// nil when not opted in, already canonical, or the file is unreadable). An
+// unparseable flake.nix yields nil with a stderr note, mirroring
+// nixpkgsMasterFinding. Detection is fully offline.
+func canonicalFormFinding(flakeDir string) *lint.CanonicalFormFinding {
+	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	if err != nil {
+		return nil
+	}
+	finding, err := lint.ClassifyCanonicalForm(src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: flake.nix not parseable; skipping canonical-form check (%v)\n", err)
+		return nil
+	}
+	return finding
 }
 
 // canonicalInputFindings queries the PAPI domain for the canonical repo-URL
@@ -444,6 +465,9 @@ func reportHasFindings(r lint.Report, sel lint.Selection) bool {
 	if sel.Has(lint.CheckCanonicalInputs) && len(r.CanonicalInputs) > 0 {
 		return true
 	}
+	if sel.Has(lint.CheckCanonicalForm) && r.CanonicalForm != nil {
+		return true
+	}
 	return false
 }
 
@@ -464,10 +488,12 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
 // — splicing in follows-opportunity lines, pruning direct dead follows
-// overrides, pinning nixpkgs-master, and rewriting non-canonical input URLs —
-// then re-locks via `nix flake lock` (for lock-affecting edits), stages the
-// touched files, and re-analyzes to compute an honest exit code. It is
-// invoked only under --fix, after the report has already been rendered.
+// overrides, pinning nixpkgs-master, rewriting non-canonical input URLs, and
+// relocating scattered follows bindings into their target input's chunk
+// (canonical-form) — then re-locks via `nix flake lock` (for lock-affecting
+// edits), stages the touched files, and re-analyzes to compute an honest
+// exit code. It is invoked only under --fix, after the report has already
+// been rendered.
 //
 // Two finding classes are report-only and never auto-resolved: multi-version
 // inputs (choosing a revision changes behavior) and transitive dead overrides
@@ -481,14 +507,19 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 // The selection gates which classes are auto-fixed: follows lines only when
 // the follows check is selected, direct dead overrides only when the
 // dead-overrides check is selected, the nixpkgs-master pin only when the
-// nixpkgs-master check is selected, and canonical-input URL rewrites only
-// when the canonical-inputs check is selected. A deselected check is neither
-// applied nor counted toward the report-only accounting or the exit code.
+// nixpkgs-master check is selected, canonical-input URL rewrites only when
+// the canonical-inputs check is selected, and scattered-follows relocation
+// only when the canonical-form check is selected (and the flake has opted in
+// via its `# canonical-form` sentinel — see FDR 0007). A deselected check is
+// neither applied nor counted toward the report-only accounting or the exit
+// code.
 //
 // Locking policy: the follows-collapse and dead-override prunes are
 // re-locked (`nix flake lock`) here because they rewrite the lock graph the
-// finding was derived from. The nixpkgs-master pin and canonical-input URL
-// rewrites are NOT re-locked by this tool — they edit flake.nix only and
+// finding was derived from. The nixpkgs-master pin, canonical-input URL
+// rewrites, and canonical-form relocation are NOT re-locked by this tool —
+// they edit flake.nix text only (canonical-form relocation moves a follows
+// binding without changing its target, so the lock graph is unaffected) and
 // leave materializing the new/updated inputs into flake.lock to the caller.
 // eng's update-nix cascade runs `nix flake update` immediately after this
 // repair. When a canonical-inputs edit rides alongside a follows/dead edit,
@@ -513,8 +544,9 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// the nixpkgs-master check is selected under --fix.
 	fixNixpkgsMaster := sel.Has(lint.CheckNixpkgsMaster) && report.NixpkgsMaster != nil
 	fixCanonicalInputs := sel.Has(lint.CheckCanonicalInputs) && len(report.CanonicalInputs) > 0
+	fixCanonicalForm := sel.Has(lint.CheckCanonicalForm) && report.CanonicalForm != nil
 
-	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster && !fixCanonicalInputs {
+	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster && !fixCanonicalInputs && !fixCanonicalForm {
 		if remaining := reportOnlyCount(report, sel); remaining > 0 {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
@@ -577,11 +609,38 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		}
 	}
 
+	var canonicalFormApplied []string
+	if fixCanonicalForm {
+		var deleteTargets, reapplyLines []string
+		deleteTargets, reapplyLines, err = nixedit.CanonicalFormFixTargets(out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not scan %s for canonical-form violations (%v).\n", nixPath, err)
+			return 1
+		}
+		canonicalFormFailed := func(err error) int {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not relocate scattered follows binding(s) in %s automatically (%v).\n"+
+				"Regroup the scattered follows line(s) above by hand.\n", nixPath, err)
+			return 1
+		}
+		if len(deleteTargets) > 0 {
+			out, _, err = nixedit.DeleteBindings(out, deleteTargets)
+			if err != nil {
+				return canonicalFormFailed(err)
+			}
+			out, canonicalFormApplied, err = nixedit.Apply(out, reapplyLines)
+			if err != nil {
+				return canonicalFormFailed(err)
+			}
+		}
+	}
+
 	// Follows and dead-override edits rewrite the lock graph, so they trigger
-	// a re-lock below; nixpkgs-master and canonical-input URL edits do not
-	// (their locks are left to the caller — see the function doc).
+	// a re-lock below; nixpkgs-master, canonical-input URL, and canonical-form
+	// edits do not (they change flake.nix text only, not what the lock
+	// resolves to — canonical-form relocation moves a follows binding without
+	// changing its target).
 	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
-	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0
+	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0 || len(canonicalFormApplied) > 0
 
 	if !flakeNixChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
@@ -604,6 +663,12 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		}
 		if nixpkgsMasterChanged {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pinned nixpkgs-master in %s to %s\n", nixPath, nixpkgsMasterURL)
+		}
+		if len(canonicalFormApplied) > 0 {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: relocated %d scattered follows binding(s) into canonical chunks in %s:\n", len(canonicalFormApplied), nixPath)
+			for _, l := range canonicalFormApplied {
+				fmt.Fprintf(os.Stderr, "    %s\n", l)
+			}
 		}
 		// Re-lock only for lock-affecting edits. nixpkgs-master and
 		// canonical-inputs edits leave lock materialization to the caller
@@ -659,6 +724,10 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	if sel.Has(lint.CheckCanonicalInputs) && canonicalURLsRewritten < len(report.CanonicalInputs) {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d canonical-input URL(s) not rewritten (already correct or unparseable); re-run lint for detail\n",
 			len(report.CanonicalInputs)-canonicalURLsRewritten)
+		return 1
+	}
+	if sel.Has(lint.CheckCanonicalForm) && after.CanonicalForm != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: canonical-form violations remain after fix (scattered: %v); re-run lint for detail\n", after.CanonicalForm.Scattered)
 		return 1
 	}
 	return 0

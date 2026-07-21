@@ -642,3 +642,155 @@ func TestApplyPathLiteralOutputs(t *testing.T) {
 		t.Errorf("bare absolute path literal was corrupted:\n%s", s)
 	}
 }
+
+// TestApplyLocationPreservingBlockChunk verifies that a follows line for input
+// X is spliced immediately after X's last existing binding (the chunk), rather
+// than at the global block-end. The result should be: igloo's follows line
+// comes right after igloo's url, before treefmt-nix's url.
+func TestApplyLocationPreservingBlockChunk(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+  };
+  outputs = { self, igloo }: { };
+}
+`
+	line := `inputs.igloo.inputs.nixpkgs-master.follows = "nixpkgs-master"`
+	out, applied, err := Apply([]byte(src), []string{line})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied = %v, want 1", applied)
+	}
+	s := string(out)
+	// The follows line must appear BEFORE treefmt-nix (in igloo's chunk).
+	iIgloo := strings.Index(s, "igloo.inputs.nixpkgs-master.follows")
+	iTfnix := strings.Index(s, "treefmt-nix.url")
+	if iIgloo < 0 {
+		t.Fatalf("follows line not found:\n%s", s)
+	}
+	if iIgloo > iTfnix {
+		t.Errorf("follows line spliced after treefmt-nix (not in igloo's chunk):\n%s", s)
+	}
+	// Existing bindings must survive.
+	if !strings.Contains(s, `igloo.url = "github:amarbel-llc/igloo";`) {
+		t.Errorf("clobbered igloo.url:\n%s", s)
+	}
+	if !strings.Contains(s, `treefmt-nix.url = "github:numtide/treefmt-nix";`) {
+		t.Errorf("clobbered treefmt-nix.url:\n%s", s)
+	}
+}
+
+// TestApplyLocationPreservingFlatChunk verifies the same property in flat form:
+// a follows line for igloo goes after igloo's url, before treefmt-nix's url.
+func TestApplyLocationPreservingFlatChunk(t *testing.T) {
+	const src = `{
+  inputs.igloo.url = "github:amarbel-llc/igloo";
+  inputs.treefmt-nix.url = "github:numtide/treefmt-nix";
+  outputs = { self, igloo }: { };
+}
+`
+	line := `inputs.igloo.inputs.nixpkgs-master.follows = "nixpkgs-master"`
+	out, applied, err := Apply([]byte(src), []string{line})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied = %v, want 1", applied)
+	}
+	s := string(out)
+	iIgloo := strings.Index(s, "igloo.inputs.nixpkgs-master.follows")
+	iTfnix := strings.Index(s, "inputs.treefmt-nix.url")
+	if iIgloo < 0 {
+		t.Fatalf("follows line not found:\n%s", s)
+	}
+	if iIgloo > iTfnix {
+		t.Errorf("follows line spliced after treefmt-nix (not in igloo's chunk):\n%s", s)
+	}
+}
+
+// TestApplyLocationPreservingNestedBlock is the concrete dodder case from
+// issue #24: eng's `dodder = { url = ...; }` sub-block, after the dead
+// override inside it was pruned, the replacement follows should land adjacent
+// to the dodder block — not at the global block-end past other inputs.
+func TestApplyLocationPreservingNestedBlock(t *testing.T) {
+	// After DeleteBindings has removed inputs.dodder.inputs.treelint.follows,
+	// Apply is called to add inputs.dodder.inputs.conformist.follows.
+	const src = `{
+  inputs = {
+    nixpkgs-master.url = "github:NixOS/nixpkgs/abc";
+    dodder = {
+      url = "github:amarbel-llc/dodder";
+    };
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+  };
+  outputs = { self }: { };
+}
+`
+	line := `inputs.dodder.inputs.conformist.follows = "conformist"`
+	out, applied, err := Apply([]byte(src), []string{line})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied = %v, want 1", applied)
+	}
+	s := string(out)
+	iDodderFollows := strings.Index(s, "dodder.inputs.conformist.follows")
+	iTfnix := strings.Index(s, "treefmt-nix.url")
+	if iDodderFollows < 0 {
+		t.Fatalf("follows line not found:\n%s", s)
+	}
+	// The follows must appear BEFORE treefmt-nix (adjacent to the dodder block).
+	if iDodderFollows > iTfnix {
+		t.Errorf("follows spliced after treefmt-nix (not adjacent to dodder block):\n%s", s)
+	}
+	// Existing bindings must survive.
+	if !strings.Contains(s, `url = "github:amarbel-llc/dodder";`) {
+		t.Errorf("clobbered dodder url:\n%s", s)
+	}
+	if !strings.Contains(s, `treefmt-nix.url = "github:numtide/treefmt-nix";`) {
+		t.Errorf("clobbered treefmt-nix.url:\n%s", s)
+	}
+}
+
+// TestApplyMultipleInputsLocationPreserving verifies that when multiple inputs
+// each get a follows line, each lands in its own chunk, not all at the global
+// insert point.
+func TestApplyMultipleInputsLocationPreserving(t *testing.T) {
+	const src = `{
+  inputs = {
+    igloo.url = "github:amarbel-llc/igloo";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    utils.url = "github:numtide/flake-utils";
+  };
+  outputs = { self }: { };
+}
+`
+	lines := []string{
+		`inputs.igloo.inputs.nixpkgs-master.follows = "nixpkgs-master"`,
+		`inputs.treefmt-nix.inputs.nixpkgs.follows = "igloo"`,
+	}
+	out, applied, err := Apply([]byte(src), lines)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 2 {
+		t.Fatalf("applied = %v, want 2", applied)
+	}
+	s := string(out)
+	iIglooFollows := strings.Index(s, "igloo.inputs.nixpkgs-master.follows")
+	iTfnixURL := strings.Index(s, "treefmt-nix.url")
+	iTfnixFollows := strings.Index(s, "treefmt-nix.inputs.nixpkgs.follows")
+	iUtilsURL := strings.Index(s, "utils.url")
+	// igloo's follows must come before treefmt-nix.url.
+	if iIglooFollows > iTfnixURL {
+		t.Errorf("igloo follows not in igloo's chunk (after treefmt-nix.url):\n%s", s)
+	}
+	// treefmt-nix's follows must come before utils.url.
+	if iTfnixFollows > iUtilsURL {
+		t.Errorf("treefmt-nix follows not in treefmt-nix's chunk (after utils.url):\n%s", s)
+	}
+}

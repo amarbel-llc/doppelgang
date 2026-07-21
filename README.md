@@ -61,6 +61,16 @@ check:
   `--checks nixpkgs-master` (or the `all` alias). Detection reads `flake.nix`
   alone — no `flake.lock` needed — so it works on a freshly-cloned repo that
   is not yet locked. See `docs/features/0005-lint-nixpkgs-master-convention.md`.
+- **canonical-form** (opt-in; not a default check; per-flake opt-in) — flags
+  inputs whose bindings (`url`, `follows`/overrides, nested sub-attrset) are
+  not contiguous under the top-level `inputs` attrset — i.e. some other
+  input's binding is interleaved between two of theirs. Only runs on a flake
+  that carries a `# canonical-form` comment on the line immediately above its
+  `inputs` binding; a flake without that sentinel is never flagged or
+  reshaped. `--fix` relocates a scattered input's follows/override bindings
+  adjacent to its remaining bindings (see below). Selected via `--checks
+  canonical-form` (or `all`). Detection reads `flake.nix` alone. See
+  `docs/features/0007-canonical-inputs-block.md`.
 
 The follows / multi-version analyses are entirely offline. Dead-override
 detection reads `<flake>/flake.nix` too (direct overrides are not recorded in

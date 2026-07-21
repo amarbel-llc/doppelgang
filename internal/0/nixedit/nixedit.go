@@ -14,6 +14,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -52,7 +53,10 @@ func Apply(src []byte, lines []string) (out []byte, applied []string, err error)
 		return nil, nil, fmt.Errorf("%w: %v", ErrUnparseable, err)
 	}
 
-	ins, ok := findInputsAttrSet(tree, src)
+	// NOTE: findInputsAttrSet may call blockChunkOffsets which re-parses a
+	// sub-attrset, invalidating `tree`. All tree navigation must occur inside
+	// findInputsAttrSet; do not use `tree` after this call.
+	ins, ok := findInputsAttrSet(tree, src, matcher)
 	if !ok {
 		return nil, nil, ErrUnparseable
 	}
@@ -75,9 +79,62 @@ func Apply(src []byte, lines []string) (out []byte, applied []string, err error)
 		return src, nil, nil
 	}
 
-	rendered, appliedLines := renderBindings(toApply, ins)
-	out = spliceAt(src, ins.insertOffset, rendered)
-	return out, appliedLines, nil
+	// Location-preserving splice: when a binding targets input X and X
+	// already has bindings in the block, splice after X's last binding
+	// rather than at the global insert point. This keeps follows lines
+	// adjacent to their input's chunk (url, existing follows, nested block)
+	// instead of floating to the bottom of the inputs attrset.
+	//
+	// Group lines by their destination byte offset. Multiple lines sharing
+	// an offset are rendered in one pass; groups are applied in ascending
+	// offset order so earlier splices never shift later offsets.
+	type group struct {
+		lines []parsedLine
+		ins   inputsAttrSet
+	}
+	groups := map[int]*group{}
+	destOf := func(pl parsedLine) (int, inputsAttrSet) {
+		if len(pl.path) >= 2 && pl.path[0] == "inputs" {
+			if off, ok := ins.chunkEnd[pl.path[1]]; ok {
+				// Chunk-preserving: insert right after X's last binding's
+				// semicolon. Always lead with a newline; no trailing
+				// indent push (the next char is the original newline).
+				chunkIns := ins
+				chunkIns.leadNewline = true
+				chunkIns.trailNewlineIndent = ""
+				return off, chunkIns
+			}
+		}
+		return ins.insertOffset, ins
+	}
+	for _, pl := range toApply {
+		off, destIns := destOf(pl)
+		if g, ok := groups[off]; ok {
+			g.lines = append(g.lines, pl)
+		} else {
+			groups[off] = &group{lines: []parsedLine{pl}, ins: destIns}
+		}
+	}
+
+	// Sort offsets ascending so we build the output in one left-to-right pass.
+	offsets := make([]int, 0, len(groups))
+	for off := range groups {
+		offsets = append(offsets, off)
+	}
+	sort.Ints(offsets)
+
+	out = make([]byte, 0, len(src)+256)
+	prev := 0
+	for _, off := range offsets {
+		g := groups[off]
+		rendered, a := renderBindings(g.lines, g.ins)
+		out = append(out, src[prev:off]...)
+		out = append(out, rendered...)
+		prev = off
+		applied = append(applied, a...)
+	}
+	out = append(out, src[prev:]...)
+	return out, applied, nil
 }
 
 // parsedLine is a follows edit decomposed into its LHS attr-path and the
@@ -169,7 +226,13 @@ type inputsAttrSet struct {
 	// insertOffset is the byte offset at which new bindings are spliced:
 	// just before the `inputs = { … }` block's closing brace (block
 	// mode), or just after the last flat inputs.* binding (flat mode).
+	// Used as the fallback when no chunk-specific offset is available.
 	insertOffset int
+	// chunkEnd maps each input name to the byte offset in src immediately
+	// after the semicolon of that input's last binding — the location-
+	// preserving splice point for new bindings targeting that input. Nil
+	// or absent when not computed (fallback to insertOffset applies).
+	chunkEnd map[string]int
 	// indent is the leading whitespace to mirror for spliced lines.
 	indent string
 	// blockMode is true when splicing inside an `inputs = { … }` block,
