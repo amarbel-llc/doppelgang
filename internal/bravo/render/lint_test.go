@@ -303,6 +303,57 @@ func TestLintDeadOverridesRenderingViaFollow(t *testing.T) {
 	}
 }
 
+// TestLintDeadOverridesRenderingViaAbsentHop covers #32's dead reason: an
+// override whose path names a hop that doesn't exist at all, partway
+// through its prefix. Like ViaFollow, this must not render the ordinary
+// "has no input" message — Target/Input here name only the override's
+// declared shape, not confirmation the path actually reaches Target.
+func TestLintDeadOverridesRenderingViaAbsentHop(t *testing.T) {
+	rep := lint.Report{
+		DeadOverrides: []lint.DeadOverride{{
+			Override:     `inputs.nebulous.inputs.bob.inputs.tap.inputs.bats.follows`,
+			Target:       "nebulous/bob/tap",
+			Input:        "bats",
+			Direct:       true,
+			ViaAbsentHop: true,
+		}},
+	}
+
+	var text bytes.Buffer
+	if err := LintText(&text, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	ts := text.String()
+	if !strings.Contains(ts, `inputs.nebulous.inputs.bob.inputs.tap.inputs.bats.follows: "nebulous/bob/tap" is unreachable — its path names an input that isn't declared (direct)`) {
+		t.Errorf("viaAbsentHop dead-override line missing/wrong:\n%s", ts)
+	}
+	if strings.Contains(ts, `has no input`) {
+		t.Errorf("viaAbsentHop override must not render the ordinary \"has no input\" message:\n%s", ts)
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, nd.Bytes())
+	dead := recs[3]
+	if len(dead.Subtest) != 1 {
+		t.Fatalf("want 1 dead subtest, got %d", len(dead.Subtest))
+	}
+	if strings.Contains(dead.Subtest[0].Description, "has no input") {
+		t.Errorf("viaAbsentHop NDJSON description must not use the ordinary message: %q", dead.Subtest[0].Description)
+	}
+	var dd struct {
+		ViaAbsentHop bool `json:"viaAbsentHop"`
+	}
+	if err := json.Unmarshal(dead.Subtest[0].Diagnostic, &dd); err != nil {
+		t.Fatalf("dead subtest diagnostic is not an object: %v", err)
+	}
+	if !dd.ViaAbsentHop {
+		t.Errorf("diagnostic viaAbsentHop = false, want true")
+	}
+}
+
 // reportAllThree is a report with a finding in every check category, used
 // to prove the --checks selection excludes a deselected check from both the
 // count and the emitted records.

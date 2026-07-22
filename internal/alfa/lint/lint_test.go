@@ -98,10 +98,11 @@ func TestFollowsRecPrunesPathPrefixShadow(t *testing.T) {
 
 // deadOverrideLock: root pins a real dependency `dep` whose own declared
 // inputs are `keep` (a legitimate follows, array form) and `real` (a node
-// edge). An override targeting `dep`'s `gone` input is dead (dep declares
-// no `gone`); overrides targeting `keep` or `real` are live. An override on
-// `absent` (not even a node input of root) cannot be resolved and must be
-// skipped, not flagged.
+// edge). An override targeting `dep`'s `gone` input is dead (dep declares no
+// `gone`); overrides targeting `keep` or `real` are live. An override whose
+// prefix names `absent` — not a node input of root at all — is also dead
+// (#32): the path can never resolve past a hop that doesn't exist, so it is
+// exactly as inert as a directly-absent final input.
 const deadOverrideLock = `{
   "nodes": {
     "root": { "inputs": { "dep": "dep", "real": "real" } },
@@ -124,24 +125,38 @@ func TestDeadOverridesFlagsOnlyDeadOnes(t *testing.T) {
 		`inputs.dep.inputs.gone.follows`, // dead: dep has no `gone`
 		`inputs.dep.inputs.keep.follows`, // live: dep declares `keep` (follows)
 		`inputs.dep.inputs.real.follows`, // live: dep declares `real` (node)
-		`inputs.absent.inputs.x.follows`, // skip: `absent` is not a node input of root
+		`inputs.absent.inputs.x.follows`, // dead: `absent` is not a node input of root at all (#32)
 		`inputs.dep.follows`,             // skip: top-level follows, not a dependency override
 	})
-	if len(got) != 1 {
-		t.Fatalf("want exactly 1 dead override, got %d: %+v", len(got), got)
+	want := map[string]struct {
+		target       string
+		input        string
+		viaAbsentHop bool
+	}{
+		`inputs.dep.inputs.gone.follows`: {target: "dep", input: "gone", viaAbsentHop: false},
+		`inputs.absent.inputs.x.follows`: {target: "absent", input: "x", viaAbsentHop: true},
 	}
-	d := got[0]
-	if d.Override != `inputs.dep.inputs.gone.follows` {
-		t.Errorf("Override = %q, want inputs.dep.inputs.gone.follows", d.Override)
+	if len(got) != len(want) {
+		t.Fatalf("want %d dead overrides, got %d: %+v", len(want), len(got), got)
 	}
-	if d.Target != "dep" {
-		t.Errorf("Target = %q, want dep", d.Target)
-	}
-	if d.Input != "gone" {
-		t.Errorf("Input = %q, want gone", d.Input)
-	}
-	if !d.Direct {
-		t.Errorf("Direct = false, want true (overrides came from the linted flake.nix)")
+	for _, d := range got {
+		w, ok := want[d.Override]
+		if !ok {
+			t.Errorf("unexpected dead override: %s", d.Override)
+			continue
+		}
+		if d.Target != w.target {
+			t.Errorf("Target for %s = %q, want %q", d.Override, d.Target, w.target)
+		}
+		if d.Input != w.input {
+			t.Errorf("Input for %s = %q, want %q", d.Override, d.Input, w.input)
+		}
+		if !d.Direct {
+			t.Errorf("Direct = false for %s, want true (overrides came from the linted flake.nix)", d.Override)
+		}
+		if d.ViaAbsentHop != w.viaAbsentHop {
+			t.Errorf("ViaAbsentHop for %s = %v, want %v", d.Override, d.ViaAbsentHop, w.viaAbsentHop)
+		}
 	}
 }
 
@@ -316,6 +331,91 @@ func TestTransitiveDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T)
 		if !d.ViaFollow {
 			t.Errorf("ViaFollow = false for %s, want true (both traverse just-us's followed bats)", d.Override)
 		}
+	}
+}
+
+// droppedInputLock reproduces #32's eng repro: nebulous dropped its `bob`
+// input entirely (an upstream bump removed the dependency), but nebulous's
+// own flake.nix still carried overrides declared against the OLD path
+// beneath it, e.g. `nebulous.inputs.bob.inputs.tap.inputs.bats.follows =
+// ...` — "bob" is not a key in nebulous's Inputs map at all, not even as a
+// follows-redirect. The depth-1 case (an override directly on a missing
+// input) already worked before #32; this fixture is the deeper case that
+// didn't: a missing hop *partway through* the prefix.
+const droppedInputLock = `{
+  "nodes": {
+    "root": { "inputs": { "nebulous": "nebulous", "chrest": "chrest" } },
+    "nebulous": {
+      "inputs": { "chrest": "chrest" },
+      "locked": { "type": "github", "owner": "o", "repo": "nebulous", "rev": "nnn", "narHash": "sha-n" }
+    },
+    "chrest": {
+      "inputs": { "bats": "bats" },
+      "locked": { "type": "github", "owner": "o", "repo": "chrest", "rev": "ccc", "narHash": "sha-c" }
+    },
+    "bats": { "locked": { "type": "github", "owner": "o", "repo": "bats", "rev": "bbb", "narHash": "sha-b" } }
+  },
+  "root": "root",
+  "version": 7
+}`
+
+// TestDeadOverridesFlagsOverridesBeneathAbsentHop is the offline
+// (DeadOverrides, root-resolved) regression for #32: an override whose
+// prefix path names a hop ("bob") the current node doesn't declare at all —
+// not even as a follows-redirect, simply absent — is flagged dead rather
+// than silently skipped. A sibling override reached entirely through real
+// node edges is still correctly resolved (live).
+func TestDeadOverridesFlagsOverridesBeneathAbsentHop(t *testing.T) {
+	l, err := flakelock.Parse([]byte(droppedInputLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := DeadOverrides(l, []string{
+		`inputs.nebulous.inputs.bob.inputs.tap.inputs.bats.follows`, // dead: nebulous has no "bob" at all (#32)
+		`inputs.nebulous.inputs.chrest.inputs.bats.follows`,         // live: nebulous.chrest is real, and chrest declares bats
+	})
+	if len(got) != 1 {
+		t.Fatalf("want 1 dead override, got %d: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Override != `inputs.nebulous.inputs.bob.inputs.tap.inputs.bats.follows` {
+		t.Errorf("Override = %q, want inputs.nebulous.inputs.bob.inputs.tap.inputs.bats.follows", d.Override)
+	}
+	if !d.Direct {
+		t.Errorf("Direct = false, want true")
+	}
+	if !d.ViaAbsentHop {
+		t.Errorf("ViaAbsentHop = false, want true (traverses nebulous's absent \"bob\" input)")
+	}
+	if d.ViaFollow {
+		t.Errorf("ViaFollow = true, want false (this is an absent hop, not a followed one)")
+	}
+}
+
+// TestTransitiveDeadOverridesFlagsOverridesBeneathAbsentHop is the --online
+// analogue: TransitiveDeadOverrides shares resolveOverrideFrom, so an
+// upstream flake's own overrides beneath an absent hop must be caught the
+// same way, starting resolution from nebulous itself rather than root.
+func TestTransitiveDeadOverridesFlagsOverridesBeneathAbsentHop(t *testing.T) {
+	l, err := flakelock.Parse([]byte(droppedInputLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := TransitiveDeadOverrides(l, "nebulous", []string{
+		`inputs.bob.inputs.tap.inputs.bats.follows`, // dead: nebulous has no "bob" at all
+	}, "o/nebulous")
+	if len(got) != 1 {
+		t.Fatalf("want 1 transitive dead override, got %d: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Direct {
+		t.Errorf("transitive override must have Direct=false: %+v", d)
+	}
+	if d.Via != "o/nebulous" {
+		t.Errorf("Via = %q, want o/nebulous", d.Via)
+	}
+	if !d.ViaAbsentHop {
+		t.Errorf("ViaAbsentHop = false, want true")
 	}
 }
 

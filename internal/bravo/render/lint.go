@@ -166,17 +166,23 @@ func nixpkgsMasterLine(f lint.NixpkgsMasterFinding) string {
 }
 
 // deadDescription renders a dead override's `<Override>: <why>` body, shared
-// by LintText's line and LintNDJSON's subtest Description. ViaFollow
-// overrides get a distinct message from ordinary ones: Target may
-// legitimately declare Input in that case (the override's path traverses a
-// followed input and never reaches Target at all), so rendering them both as
-// "Target has no input Input" would assert something false about the flake
-// graph for the ViaFollow case. See dead.go's resolveOverrideFrom.
+// by LintText's line and LintNDJSON's subtest Description. ViaFollow and
+// ViaAbsentHop overrides each get a distinct message from the ordinary case:
+// their path never fully resolves to Target (ViaFollow: it traverses a
+// followed input, and Target may legitimately declare Input regardless;
+// ViaAbsentHop: a hop before ever reaching Target names an input that
+// doesn't exist at all), so rendering either as "Target has no input Input"
+// would assert something false about the flake graph. See dead.go's
+// resolveOverrideFrom.
 func deadDescription(d lint.DeadOverride) string {
-	if d.ViaFollow {
+	switch {
+	case d.ViaFollow:
 		return fmt.Sprintf("%s: %q is unreachable — its path traverses a followed input", d.Override, d.Target)
+	case d.ViaAbsentHop:
+		return fmt.Sprintf("%s: %q is unreachable — its path names an input that isn't declared", d.Override, d.Target)
+	default:
+		return fmt.Sprintf("%s: %q has no input %q", d.Override, d.Target, d.Input)
 	}
-	return fmt.Sprintf("%s: %q has no input %q", d.Override, d.Target, d.Input)
 }
 
 // deadReason renders deadDescription plus LintText's trailing `(<tag>)` —
@@ -223,12 +229,13 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Versions []jsonVersion `json:"versions"`
 	}
 	type jsonDead struct {
-		Override  string `json:"override"`
-		Target    string `json:"target"`
-		Input     string `json:"input"`
-		Direct    bool   `json:"direct"`
-		Via       string `json:"via,omitempty"`
-		ViaFollow bool   `json:"viaFollow,omitempty"`
+		Override     string `json:"override"`
+		Target       string `json:"target"`
+		Input        string `json:"input"`
+		Direct       bool   `json:"direct"`
+		Via          string `json:"via,omitempty"`
+		ViaFollow    bool   `json:"viaFollow,omitempty"`
+		ViaAbsentHop bool   `json:"viaAbsentHop,omitempty"`
 	}
 	type jsonNixpkgsMaster struct {
 		// Conformant is true when the input is pinned to the convention.
@@ -288,7 +295,8 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		dead := make([]jsonDead, 0, len(s.Report.DeadOverrides))
 		for _, d := range s.Report.DeadOverrides {
 			dead = append(dead, jsonDead{
-				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via, ViaFollow: d.ViaFollow,
+				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
+				ViaFollow: d.ViaFollow, ViaAbsentHop: d.ViaAbsentHop,
 			})
 		}
 		out.DeadOverrides = &dead
@@ -385,12 +393,13 @@ type ndjsonMultiVer struct {
 }
 
 type ndjsonDeadDiag struct {
-	Override  string `json:"override"`
-	Target    string `json:"target"`
-	Input     string `json:"input"`
-	Direct    bool   `json:"direct"`
-	Via       string `json:"via,omitempty"`
-	ViaFollow bool   `json:"viaFollow,omitempty"`
+	Override     string `json:"override"`
+	Target       string `json:"target"`
+	Input        string `json:"input"`
+	Direct       bool   `json:"direct"`
+	Via          string `json:"via,omitempty"`
+	ViaFollow    bool   `json:"viaFollow,omitempty"`
+	ViaAbsentHop bool   `json:"viaAbsentHop,omitempty"`
 }
 
 type ndjsonNixpkgsMasterDiag struct {
@@ -474,7 +483,10 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 			N:           i + 1,
 			Description: deadDescription(d),
 			OK:          false,
-			Diagnostic:  ndjsonDeadDiag{Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via, ViaFollow: d.ViaFollow},
+			Diagnostic: ndjsonDeadDiag{
+				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
+				ViaFollow: d.ViaFollow, ViaAbsentHop: d.ViaAbsentHop,
+			},
 		})
 	}
 
