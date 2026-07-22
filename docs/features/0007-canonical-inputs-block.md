@@ -191,6 +191,17 @@ Given an `inputs` block that opts in via `# canonical-form`:
   drives a scattered fixture through the fix pipeline once, confirms it
   is contiguous afterward, and confirms a second `CanonicalFormFixTargets`
   pass finds nothing left to change.
+- **nixfmt-stability, at scale.** Promotion criterion (3) below flagged a
+  real gap (doppelgang#27): `--fix`'s output was syntactically correct but
+  not nixfmt-stable on a real-world-scale flake (eng's 31-input block,
+  mixed nested/flat chunks, long comments) — `deleteSpan`'s own-line
+  deletion left blank-line scars nixfmt would still collapse on its next
+  run. Fixed and verified directly against the real nixfmt-rfc-style
+  binary (not just inferred); `TestCanonicalFormFixNixfmtStableAtRealWorldScale`
+  now covers this at the scale the earlier fixtures were too thin to catch
+  it at. This resolves the code-level blocker criterion (3) names, but the
+  criterion itself — an actual non-eng fleet flake opting in and being
+  confirmed stable — remains a separate, unmet operational step.
 
 ### Deferred (not implemented in this change)
 

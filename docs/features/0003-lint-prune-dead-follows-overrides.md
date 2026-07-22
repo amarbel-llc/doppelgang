@@ -249,10 +249,14 @@ all requires the online transitive path; offline, this finding does not appear.)
 - **NDJSON plan count changes 2 → 3.** Any consumer asserting exactly two
   top-level checks (per FDR-0002, which states "lint always runs exactly two
   checks") will see three. This is a deliberate, documented contract change.
-- **Direct fix may need a second pass in principle.** As with the add-follows
-  path, `--fix` re-analyzes after re-locking; if removing one override unmasks
-  another finding, the non-zero exit signals that another `lint` pass is
-  warranted.
+- **Direct fix converges within one invocation (bounded).** `--fix` loops
+  prune→re-lock→re-analyze up to a small round cap (currently 3) so a chain
+  of unmasked dead overrides — including one exposed by a follows-collapse
+  in the same run — resolves without a second `lint --fix` invocation (see
+  doppelgang#31). Exceeding the cap is not expected in practice
+  (convergence is guaranteed in principle, since each round strictly
+  removes bindings from a finite file) but still exits non-zero with a
+  message to re-run `lint` for detail.
 
 ## Tuning Levers
 
