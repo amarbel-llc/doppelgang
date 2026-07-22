@@ -36,6 +36,46 @@ const depLock = `{
   "version": 7
 }`
 
+// TestDirectDeadOverrideTargets confirms the shared helper collects only
+// Direct overrides' attr-paths, in report order, ignoring transitive ones —
+// the same collection lintFix's initial fix and its #31 convergence loop
+// both rely on to decide what to prune each round.
+func TestDirectDeadOverrideTargets(t *testing.T) {
+	r := lint.Report{
+		DeadOverrides: []lint.DeadOverride{
+			{Override: `inputs.a.inputs.x.follows`, Direct: true},
+			{Override: `inputs.b.inputs.y.follows`, Direct: false, Via: "o/b"},
+			{Override: `inputs.c.inputs.z.follows`, Direct: true},
+		},
+	}
+	got := directDeadOverrideTargets(r)
+	want := []string{`inputs.a.inputs.x.follows`, `inputs.c.inputs.z.follows`}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDirectDeadOverrideTargetsEmpty confirms a report with no direct dead
+// overrides (nil or all-transitive) yields no targets — the condition
+// lintFix's convergence loop checks each round to decide whether to keep
+// going.
+func TestDirectDeadOverrideTargetsEmpty(t *testing.T) {
+	if got := directDeadOverrideTargets(lint.Report{}); len(got) != 0 {
+		t.Errorf("empty report: got %v, want none", got)
+	}
+	allTransitive := lint.Report{DeadOverrides: []lint.DeadOverride{
+		{Override: `inputs.a.inputs.x.follows`, Direct: false, Via: "o/a"},
+	}}
+	if got := directDeadOverrideTargets(allTransitive); len(got) != 0 {
+		t.Errorf("all-transitive report: got %v, want none", got)
+	}
+}
+
 func TestAnalyzeFlakeDetectsDirectDeadOverride(t *testing.T) {
 	dir := writeFlake(t, `{
   inputs = {

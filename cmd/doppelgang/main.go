@@ -486,6 +486,25 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 	return n
 }
 
+// maxFixRounds bounds lintFix's dead-override convergence loop: round 1 is
+// the main single-pass fix, rounds 2..maxFixRounds prune anything a prior
+// round's collapse newly exposed. See #31.
+const maxFixRounds = 3
+
+// directDeadOverrideTargets returns the full attr-paths of a report's direct
+// (not transitive) dead overrides — the ones lintFix can prune locally via
+// DeleteBindings. Shared by lintFix's initial fix and its convergence loop
+// so both collect targets identically.
+func directDeadOverrideTargets(r lint.Report) []string {
+	var targets []string
+	for _, d := range r.DeadOverrides {
+		if d.Direct {
+			targets = append(targets, d.Override)
+		}
+	}
+	return targets
+}
+
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
 // — splicing in follows-opportunity lines, pruning direct dead follows
 // overrides, pinning nixpkgs-master, rewriting non-canonical input URLs, and
@@ -527,6 +546,15 @@ func reportOnlyCount(r lint.Report, sel lint.Selection) int {
 // repair. When a canonical-inputs edit rides alongside a follows/dead edit,
 // the shared re-lock those require will pick it up as a side effect.
 // flake.nix is always staged regardless.
+//
+// Fixed point: collapsing a follows can expose overrides nested beneath the
+// now-followed input as newly dead (see dead.go's resolveOverrideFrom) —
+// invisible to the pre-fix report computed before the collapse ran. After
+// the first re-lock and re-analyze below, a bounded loop (maxFixRounds)
+// prunes any such newly-exposed direct dead overrides and re-locks again,
+// so a single invocation converges the way FDR 0007's composition model
+// calls for ("a collapse implies pruning the subtree it obsoletes") instead
+// of requiring the caller to re-run --fix by hand.
 func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.Selection, nixpkgsMasterSHA string) int {
 	var followsLines []string
 	if sel.Has(lint.CheckFollows) {
@@ -536,11 +564,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	}
 	var deadTargets []string
 	if sel.Has(lint.CheckDeadOverrides) {
-		for _, d := range report.DeadOverrides {
-			if d.Direct {
-				deadTargets = append(deadTargets, d.Override)
-			}
-		}
+		deadTargets = directDeadOverrideTargets(report)
 	}
 	// The upfront validation in lintMain guarantees a valid sha here whenever
 	// the nixpkgs-master check is selected under --fix.
@@ -713,6 +737,56 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
 	}
+
+	// Convergence loop for #31: prune any direct dead overrides this round's
+	// collapse exposed, re-lock, and re-analyze again — up to maxFixRounds
+	// total rounds (this one plus a few more). Convergence is guaranteed in
+	// principle (each round strictly removes bindings from a finite file, so
+	// the loop can run at most as many rounds as there are overrides to
+	// prune); the round cap is a defensive bound, not an expected outcome.
+	// Breaking out early when a round makes no progress (moreTargets or
+	// removedMore empty) avoids spinning without result — the unmodified
+	// tail checks below then report whatever's still in `after` exactly as
+	// they already do for a single-round fix.
+	for fixRound := 2; sel.Has(lint.CheckDeadOverrides) && len(after.DeadOverrides) > 0 && fixRound <= maxFixRounds; fixRound++ {
+		moreTargets := directDeadOverrideTargets(after)
+		if len(moreTargets) == 0 {
+			break // remaining findings are transitive-only; not ours to prune here
+		}
+		curSrc, err := os.ReadFile(nixPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: read %s: %v\n", fixRound, nixPath, err)
+			return 1
+		}
+		nextOut, removedMore, err := nixedit.DeleteBindings(curSrc, moreTargets)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: could not prune newly-exposed dead override(s) from %s automatically (%v).\n"+
+				"Remove the dead follows line(s) above by hand, then re-run `nix flake lock`.\n", fixRound, nixPath, err)
+			return 1
+		}
+		if len(removedMore) == 0 {
+			break // targets didn't match actual bindings; avoid spinning without progress
+		}
+		if err := os.WriteFile(nixPath, nextOut, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: write %s: %v\n", fixRound, nixPath, err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: pruned %d dead follows override(s) exposed by the previous round's collapse from %s:\n", fixRound, len(removedMore), nixPath)
+		for _, l := range removedMore {
+			fmt.Fprintf(os.Stderr, "    %s\n", l)
+		}
+		if err := relock(flakeDir); err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: re-lock failed: %v\n", fixRound, err)
+			return 1
+		}
+		stageFixedFiles(flakeDir)
+		after, err = analyzeFlake(ctx, flakeDir, sel, false, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: re-analyze: %v\n", fixRound, err)
+			return 1
+		}
+	}
+
 	if sel.Has(lint.CheckFollows) && len(after.Follows) > 0 {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d follows opportunity group(s) remain after fix (re-run lint for detail)\n", len(after.Follows))
 		return 1
