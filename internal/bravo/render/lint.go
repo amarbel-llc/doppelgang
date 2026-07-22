@@ -89,7 +89,7 @@ func LintText(w io.Writer, s LintSummary) error {
 			}
 		}
 		for _, d := range s.Report.DeadOverrides {
-			if _, err := fmt.Fprintf(w, "%s%s\n", deadVia(d), deadReason(d)); err != nil {
+			if _, err := fmt.Fprintf(w, "%s%s\n", deadVia(d), deadLine(d)); err != nil {
 				return err
 			}
 		}
@@ -166,29 +166,29 @@ func nixpkgsMasterLine(f lint.NixpkgsMasterFinding) string {
 }
 
 // deadDescription renders a dead override's `<Override>: <why>` body, shared
-// by LintText's line and LintNDJSON's subtest Description. ViaFollow and
-// ViaAbsentHop overrides each get a distinct message from the ordinary case:
-// their path never fully resolves to Target (ViaFollow: it traverses a
-// followed input, and Target may legitimately declare Input regardless;
-// ViaAbsentHop: a hop before ever reaching Target names an input that
-// doesn't exist at all), so rendering either as "Target has no input Input"
-// would assert something false about the flake graph. See dead.go's
-// resolveOverrideFrom.
+// by LintText's line and LintNDJSON's subtest Description. DeadReasonViaFollow
+// and DeadReasonViaAbsentHop overrides each get a distinct message from the
+// ordinary DeadReasonInputAbsent case: their path never fully resolves to
+// Target (ViaFollow: it traverses a followed input, and Target may
+// legitimately declare Input regardless; ViaAbsentHop: a hop before ever
+// reaching Target names an input that doesn't exist at all), so rendering
+// either as "Target has no input Input" would assert something false about
+// the flake graph. See dead.go's resolveOverrideFrom.
 func deadDescription(d lint.DeadOverride) string {
-	switch {
-	case d.ViaFollow:
+	switch d.Reason {
+	case lint.DeadReasonViaFollow:
 		return fmt.Sprintf("%s: %q is unreachable — its path traverses a followed input", d.Override, d.Target)
-	case d.ViaAbsentHop:
+	case lint.DeadReasonViaAbsentHop:
 		return fmt.Sprintf("%s: %q is unreachable — its path names an input that isn't declared", d.Override, d.Target)
 	default:
 		return fmt.Sprintf("%s: %q has no input %q", d.Override, d.Target, d.Input)
 	}
 }
 
-// deadReason renders deadDescription plus LintText's trailing `(<tag>)` —
+// deadLine renders deadDescription plus LintText's trailing `(<tag>)` —
 // deadVia's optional "<upstream> → " prefix is prepended separately by
 // callers.
-func deadReason(d lint.DeadOverride) string {
+func deadLine(d lint.DeadOverride) string {
 	return fmt.Sprintf("%s (%s)", deadDescription(d), deadTag(d))
 }
 
@@ -228,15 +228,6 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		Source   string        `json:"source"`
 		Versions []jsonVersion `json:"versions"`
 	}
-	type jsonDead struct {
-		Override     string `json:"override"`
-		Target       string `json:"target"`
-		Input        string `json:"input"`
-		Direct       bool   `json:"direct"`
-		Via          string `json:"via,omitempty"`
-		ViaFollow    bool   `json:"viaFollow,omitempty"`
-		ViaAbsentHop bool   `json:"viaAbsentHop,omitempty"`
-	}
 	type jsonNixpkgsMaster struct {
 		// Conformant is true when the input is pinned to the convention.
 		Conformant bool `json:"conformant"`
@@ -266,7 +257,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 	out := struct {
 		Follows         *[]jsonFollows        `json:"followsOpportunities,omitempty"`
 		MultiVersion    *[]jsonMulti          `json:"multiVersionInputs,omitempty"`
-		DeadOverrides   *[]jsonDead           `json:"deadOverrides,omitempty"`
+		DeadOverrides   *[]deadOverrideDiag   `json:"deadOverrides,omitempty"`
 		NixpkgsMaster   *jsonNixpkgsMaster    `json:"nixpkgsMaster,omitempty"`
 		CanonicalInputs *[]jsonCanonicalInput `json:"canonicalInputs,omitempty"`
 		CanonicalForm   *jsonCanonicalForm    `json:"canonicalForm,omitempty"`
@@ -292,12 +283,9 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		out.MultiVersion = &multi
 	}
 	if s.active(lint.CheckDeadOverrides) {
-		dead := make([]jsonDead, 0, len(s.Report.DeadOverrides))
+		dead := make([]deadOverrideDiag, 0, len(s.Report.DeadOverrides))
 		for _, d := range s.Report.DeadOverrides {
-			dead = append(dead, jsonDead{
-				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
-				ViaFollow: d.ViaFollow, ViaAbsentHop: d.ViaAbsentHop,
-			})
+			dead = append(dead, newDeadOverrideDiag(d))
 		}
 		out.DeadOverrides = &dead
 	}
@@ -392,14 +380,26 @@ type ndjsonMultiVer struct {
 	Path string `json:"path"`
 }
 
-type ndjsonDeadDiag struct {
-	Override     string `json:"override"`
-	Target       string `json:"target"`
-	Input        string `json:"input"`
-	Direct       bool   `json:"direct"`
-	Via          string `json:"via,omitempty"`
-	ViaFollow    bool   `json:"viaFollow,omitempty"`
-	ViaAbsentHop bool   `json:"viaAbsentHop,omitempty"`
+// deadOverrideDiag is the structured form of a dead override, shared by
+// LintJSON's `deadOverrides` array and LintNDJSON's dead-overrides subtest
+// diagnostics — the two formats' shapes are identical, so one type serves
+// both instead of two hand-kept-in-sync copies.
+type deadOverrideDiag struct {
+	Override string `json:"override"`
+	Target   string `json:"target"`
+	Input    string `json:"input"`
+	Direct   bool   `json:"direct"`
+	Via      string `json:"via,omitempty"`
+	Reason   string `json:"reason"`
+}
+
+// newDeadOverrideDiag converts a lint.DeadOverride into its structured
+// diagnostic form.
+func newDeadOverrideDiag(d lint.DeadOverride) deadOverrideDiag {
+	return deadOverrideDiag{
+		Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
+		Reason: d.Reason.String(),
+	}
 }
 
 type ndjsonNixpkgsMasterDiag struct {
@@ -483,10 +483,7 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 			N:           i + 1,
 			Description: deadDescription(d),
 			OK:          false,
-			Diagnostic: ndjsonDeadDiag{
-				Override: d.Override, Target: d.Target, Input: d.Input, Direct: d.Direct, Via: d.Via,
-				ViaFollow: d.ViaFollow, ViaAbsentHop: d.ViaAbsentHop,
-			},
+			Diagnostic:  newDeadOverrideDiag(d),
 		})
 	}
 

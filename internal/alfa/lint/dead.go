@@ -7,6 +7,47 @@ import (
 	"code.linenisgreat.com/doppelgang/internal/0/flakelock"
 )
 
+// DeadReason is why a DeadOverride is dead — one of three peer failure
+// modes a prefix-chain resolution can end in (see resolveOverrideFrom),
+// mirroring NixpkgsMasterStatus's convention in this same package: there is
+// no "live" value, since a DeadOverride is only ever constructed once one of
+// these three has already been determined.
+type DeadReason int
+
+const (
+	// DeadReasonInputAbsent: the ordinary case — Input is absent from
+	// Target's fully-resolved declared inputs, e.g. Target declares no
+	// input named Input at all.
+	DeadReasonInputAbsent DeadReason = iota
+	// DeadReasonViaFollow: the prefix path traverses a followed input
+	// (#30). Target may legitimately declare Input in this case — the
+	// override's path just never reaches it, since nix drops any override
+	// declared beneath a redirected input entirely, regardless of whether
+	// the redirect's destination happens to also declare an input of the
+	// same name.
+	DeadReasonViaFollow
+	// DeadReasonViaAbsentHop: a hop before the final element — not
+	// necessarily Target itself — names an input its node doesn't declare
+	// at all (#32). The path can never resolve past a hop that doesn't
+	// exist, so it is exactly as provably inert as DeadReasonInputAbsent.
+	DeadReasonViaAbsentHop
+)
+
+// String renders the reason as the token used in diagnostics and the
+// machine-readable formats.
+func (r DeadReason) String() string {
+	switch r {
+	case DeadReasonInputAbsent:
+		return "input-absent"
+	case DeadReasonViaFollow:
+		return "via-follow"
+	case DeadReasonViaAbsentHop:
+		return "via-absent-hop"
+	default:
+		return "unknown"
+	}
+}
+
 // DeadOverride is a `follows` override that points at an input the targeted
 // dependency does not declare — the condition Nix warns on as "has an
 // override for a non-existent input". It overrides nothing and can be pruned.
@@ -29,22 +70,13 @@ type DeadOverride struct {
 	// override (the place it must be fixed). It is empty for direct
 	// overrides; the best-effort online transitive path populates it.
 	Via string
-	// ViaFollow is true when this override is dead because its prefix path
-	// traverses a followed input, rather than because Input is absent from
-	// Target's declared inputs (see resolveOverrideFrom). Target may
-	// legitimately declare Input in this case — the override's path just
-	// never reaches it — so callers rendering "Target has no input Input"
-	// for the ordinary case must render a different message here, or risk
-	// asserting something false about the flake graph.
-	ViaFollow bool
-	// ViaAbsentHop is true when this override is dead because a hop in its
-	// prefix path — not necessarily the final one — names an input its node
-	// doesn't declare at all, rather than because the FINAL element (Input)
-	// is absent from Target's declared inputs (see resolveOverrideFrom).
-	// Like ViaFollow, this means the path never fully resolves to Target, so
-	// callers must not render the ordinary "Target has no input Input"
-	// message for it.
-	ViaAbsentHop bool
+	// Reason is why this override is dead. For DeadReasonViaFollow and
+	// DeadReasonViaAbsentHop, the override's path never fully resolves to
+	// Target at all — Target may legitimately declare Input in either case
+	// — so callers must not render the ordinary "Target has no input Input"
+	// message except for DeadReasonInputAbsent, or risk asserting something
+	// false about the flake graph.
+	Reason DeadReason
 }
 
 // DeadOverrides resolves each override (a full-form `inputs.<dep>…inputs.<x>.follows`
@@ -68,17 +100,16 @@ func DeadOverrides(l *flakelock.Lock, overrides []string) []DeadOverride {
 		if !ok {
 			continue
 		}
-		target, dead, viaFollow, viaAbsentHop, ok := resolveOverride(l, chain)
+		target, dead, reason, ok := resolveOverride(l, chain)
 		if !ok || !dead {
 			continue
 		}
 		out = append(out, DeadOverride{
-			Override:     ov,
-			Target:       joinSlash(target),
-			Input:        chain[len(chain)-1],
-			Direct:       true,
-			ViaFollow:    viaFollow,
-			ViaAbsentHop: viaAbsentHop,
+			Override: ov,
+			Target:   joinSlash(target),
+			Input:    chain[len(chain)-1],
+			Direct:   true,
+			Reason:   reason,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Override < out[j].Override })
@@ -133,18 +164,17 @@ func TransitiveDeadOverrides(l *flakelock.Lock, startKey string, overrides []str
 		if !ok {
 			continue
 		}
-		target, dead, viaFollow, viaAbsentHop, ok := resolveOverrideFrom(l, startKey, chain)
+		target, dead, reason, ok := resolveOverrideFrom(l, startKey, chain)
 		if !ok || !dead {
 			continue
 		}
 		out = append(out, DeadOverride{
-			Override:     ov,
-			Target:       joinSlash(target),
-			Input:        chain[len(chain)-1],
-			Direct:       false,
-			Via:          via,
-			ViaFollow:    viaFollow,
-			ViaAbsentHop: viaAbsentHop,
+			Override: ov,
+			Target:   joinSlash(target),
+			Input:    chain[len(chain)-1],
+			Direct:   false,
+			Via:      via,
+			Reason:   reason,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Override < out[j].Override })
@@ -153,7 +183,7 @@ func TransitiveDeadOverrides(l *flakelock.Lock, startKey string, overrides []str
 
 // resolveOverride resolves an override declared in the linted flake.nix,
 // walking from the lock root. See resolveOverrideFrom.
-func resolveOverride(l *flakelock.Lock, chain []string) (target []string, dead, viaFollow, viaAbsentHop, ok bool) {
+func resolveOverride(l *flakelock.Lock, chain []string) (target []string, dead bool, reason DeadReason, ok bool) {
 	return resolveOverrideFrom(l, l.Root, chain)
 }
 
@@ -161,60 +191,55 @@ func resolveOverride(l *flakelock.Lock, chain []string) (target []string, dead, 
 // last) from startKey via string-form node edges, then reports whether the
 // final element is absent from the reached node's declared inputs (its Inputs
 // keys, which include both node edges and legitimate follows arrays). target
-// is the resolved prefix path. ok is false only when a hop's *starting* node
-// is itself missing from the lock (l.Nodes[cur] doesn't exist) — a
-// malformed-lock case that should not arise for a validly-resolved cur, kept
-// as a defensive skip rather than a hard error.
+// is the resolved prefix path. reason is meaningful only when dead is true.
+// ok is false only when a hop's *starting* node is itself missing from the
+// lock (l.Nodes[cur] doesn't exist) — a malformed-lock case that should not
+// arise for a validly-resolved cur, kept as a defensive skip rather than a
+// hard error.
 //
 // A prefix hop that is itself a follows-redirect (array-form InputRef, no
-// Node) short-circuits to dead=true (viaFollow=true) rather than resolving
-// through it: once nix redirects an input via `follows`, that input's own
-// subtree is never evaluated, so any override declared beneath it — however
-// it reads syntactically, whatever name it targets — is inert, the same "has
-// an override for a non-existent input" nix warns on for a directly-absent
-// target. This is true regardless of whether the redirect's destination
-// happens to also declare an input of the same name; the override's original
-// path never reaches it. (#30 — collapsing an input via `follows --fix`
-// previously left every override nested beneath it undetected as dead, in
-// both DeadOverrides and TransitiveDeadOverrides, since they share this
-// walk.)
+// Node) short-circuits to dead=true, DeadReasonViaFollow rather than
+// resolving through it: once nix redirects an input via `follows`, that
+// input's own subtree is never evaluated, so any override declared beneath
+// it — however it reads syntactically, whatever name it targets — is inert,
+// the same "has an override for a non-existent input" nix warns on for a
+// directly-absent target. This is true regardless of whether the redirect's
+// destination happens to also declare an input of the same name; the
+// override's original path never reaches it. (#30 — collapsing an input via
+// `follows --fix` previously left every override nested beneath it
+// undetected as dead, in both DeadOverrides and TransitiveDeadOverrides,
+// since they share this walk.)
 //
 // A prefix hop that names an input the current node simply doesn't declare
 // at all — has=false, the sibling gap to the followed-edge case — likewise
-// short-circuits to dead=true (viaAbsentHop=true), rather than the previous
-// behavior of bailing with ok=false (skip, not flagged). The override's path
-// can never resolve past a hop that doesn't exist, so it is exactly as
-// provably inert as a directly-absent final Input. (#32 — same skip-vs-flag
-// bug as #30, one hop earlier: a node dropping an input entirely, e.g. a
-// dependency losing a transitive input across an upstream bump, silently
-// stranded every override declared beneath the old path.)
-//
-// Because viaFollow and viaAbsentHop overrides both mean the path never
-// fully reaches Target, callers must not render either with the ordinary
-// "Target has no input Input" message — Target may legitimately declare
-// Input in the viaFollow case, and in the viaAbsentHop case Target itself
-// may not even be where the break occurred.
-func resolveOverrideFrom(l *flakelock.Lock, startKey string, chain []string) (target []string, dead, viaFollow, viaAbsentHop, ok bool) {
+// short-circuits to dead=true, DeadReasonViaAbsentHop, rather than the
+// previous behavior of bailing with ok=false (skip, not flagged). The
+// override's path can never resolve past a hop that doesn't exist, so it is
+// exactly as provably inert as DeadReasonInputAbsent. (#32 — same
+// skip-vs-flag bug as #30, one hop earlier: a node dropping an input
+// entirely, e.g. a dependency losing a transitive input across an upstream
+// bump, silently stranded every override declared beneath the old path.)
+func resolveOverrideFrom(l *flakelock.Lock, startKey string, chain []string) (target []string, dead bool, reason DeadReason, ok bool) {
 	cur := startKey
 	prefix := chain[:len(chain)-1]
 	for _, name := range prefix {
 		node, exists := l.Nodes[cur]
 		if !exists {
-			return nil, false, false, false, false
+			return nil, false, 0, false
 		}
 		ref, has := node.Inputs[name]
 		if !has {
-			return prefix, true, false, true, true
+			return prefix, true, DeadReasonViaAbsentHop, true
 		}
 		if ref.Node == "" {
-			return prefix, true, true, false, true
+			return prefix, true, DeadReasonViaFollow, true
 		}
 		cur = ref.Node
 	}
 	node, exists := l.Nodes[cur]
 	if !exists {
-		return nil, false, false, false, false
+		return nil, false, 0, false
 	}
 	_, declared := node.Inputs[chain[len(chain)-1]]
-	return prefix, !declared, false, false, true
+	return prefix, !declared, DeadReasonInputAbsent, true
 }

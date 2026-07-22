@@ -129,12 +129,12 @@ func TestDeadOverridesFlagsOnlyDeadOnes(t *testing.T) {
 		`inputs.dep.follows`,             // skip: top-level follows, not a dependency override
 	})
 	want := map[string]struct {
-		target       string
-		input        string
-		viaAbsentHop bool
+		target string
+		input  string
+		reason DeadReason
 	}{
-		`inputs.dep.inputs.gone.follows`: {target: "dep", input: "gone", viaAbsentHop: false},
-		`inputs.absent.inputs.x.follows`: {target: "absent", input: "x", viaAbsentHop: true},
+		`inputs.dep.inputs.gone.follows`: {target: "dep", input: "gone", reason: DeadReasonInputAbsent},
+		`inputs.absent.inputs.x.follows`: {target: "absent", input: "x", reason: DeadReasonViaAbsentHop},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("want %d dead overrides, got %d: %+v", len(want), len(got), got)
@@ -154,8 +154,8 @@ func TestDeadOverridesFlagsOnlyDeadOnes(t *testing.T) {
 		if !d.Direct {
 			t.Errorf("Direct = false for %s, want true (overrides came from the linted flake.nix)", d.Override)
 		}
-		if d.ViaAbsentHop != w.viaAbsentHop {
-			t.Errorf("ViaAbsentHop for %s = %v, want %v", d.Override, d.ViaAbsentHop, w.viaAbsentHop)
+		if d.Reason != w.reason {
+			t.Errorf("Reason for %s = %v, want %v", d.Override, d.Reason, w.reason)
 		}
 	}
 }
@@ -265,16 +265,16 @@ func TestDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T) {
 		`inputs.just-us.inputs.bats.inputs.conformist.follows`:             true,
 		`inputs.chrest.inputs.bats.inputs.gone.follows`:                    true,
 	}
-	// ViaFollow distinguishes the two dead *reasons* this fixture exercises:
+	// Reason distinguishes the two dead *reasons* this fixture exercises:
 	// the two just-us/bats overrides are dead because their path traverses
-	// just-us's now-followed bats (ViaFollow=true, even though chrest's real
-	// bats node declares both "nixpkgs" is absent AND — irrelevantly —
-	// "conformist"); chrest/bats/gone is dead the ordinary way, an absent
-	// input on a real (non-followed) node.
-	wantViaFollow := map[string]bool{
-		`inputs.just-us.inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`: true,
-		`inputs.just-us.inputs.bats.inputs.conformist.follows`:             true,
-		`inputs.chrest.inputs.bats.inputs.gone.follows`:                    false,
+	// just-us's now-followed bats (DeadReasonViaFollow, even though
+	// chrest's real bats node declares both "nixpkgs" is absent AND —
+	// irrelevantly — "conformist"); chrest/bats/gone is dead the ordinary
+	// way, an absent input on a real (non-followed) node.
+	wantReason := map[string]DeadReason{
+		`inputs.just-us.inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`: DeadReasonViaFollow,
+		`inputs.just-us.inputs.bats.inputs.conformist.follows`:             DeadReasonViaFollow,
+		`inputs.chrest.inputs.bats.inputs.gone.follows`:                    DeadReasonInputAbsent,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("want %d dead overrides, got %d: %+v", len(want), len(got), got)
@@ -286,8 +286,8 @@ func TestDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T) {
 		if !d.Direct {
 			t.Errorf("Direct = false for %s, want true", d.Override)
 		}
-		if d.ViaFollow != wantViaFollow[d.Override] {
-			t.Errorf("ViaFollow for %s = %v, want %v", d.Override, d.ViaFollow, wantViaFollow[d.Override])
+		if d.Reason != wantReason[d.Override] {
+			t.Errorf("Reason for %s = %v, want %v", d.Override, d.Reason, wantReason[d.Override])
 		}
 	}
 }
@@ -328,8 +328,8 @@ func TestTransitiveDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T)
 		if want, ok := wantTarget[d.Override]; ok && d.Target != want {
 			t.Errorf("Target for %s = %q, want %q", d.Override, d.Target, want)
 		}
-		if !d.ViaFollow {
-			t.Errorf("ViaFollow = false for %s, want true (both traverse just-us's followed bats)", d.Override)
+		if d.Reason != DeadReasonViaFollow {
+			t.Errorf("Reason for %s = %v, want DeadReasonViaFollow (both traverse just-us's followed bats)", d.Override, d.Reason)
 		}
 	}
 }
@@ -384,11 +384,8 @@ func TestDeadOverridesFlagsOverridesBeneathAbsentHop(t *testing.T) {
 	if !d.Direct {
 		t.Errorf("Direct = false, want true")
 	}
-	if !d.ViaAbsentHop {
-		t.Errorf("ViaAbsentHop = false, want true (traverses nebulous's absent \"bob\" input)")
-	}
-	if d.ViaFollow {
-		t.Errorf("ViaFollow = true, want false (this is an absent hop, not a followed one)")
+	if d.Reason != DeadReasonViaAbsentHop {
+		t.Errorf("Reason = %v, want DeadReasonViaAbsentHop (traverses nebulous's absent \"bob\" input)", d.Reason)
 	}
 }
 
@@ -414,8 +411,8 @@ func TestTransitiveDeadOverridesFlagsOverridesBeneathAbsentHop(t *testing.T) {
 	if d.Via != "o/nebulous" {
 		t.Errorf("Via = %q, want o/nebulous", d.Via)
 	}
-	if !d.ViaAbsentHop {
-		t.Errorf("ViaAbsentHop = false, want true")
+	if d.Reason != DeadReasonViaAbsentHop {
+		t.Errorf("Reason = %v, want DeadReasonViaAbsentHop", d.Reason)
 	}
 }
 
