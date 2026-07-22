@@ -194,6 +194,114 @@ func TestTransitiveDeadOverrides(t *testing.T) {
 	}
 }
 
+// collapsedFollowsLock reproduces #30's eng repro: `follows --fix` collapsed
+// just-us's `bats` input onto chrest's copy (just-us.inputs.bats is now
+// array-form, following ["chrest","bats"]), leaving behind overrides that
+// were declared against the OLD real "bats" node just-us used to have —
+// nested overrides Nix ignores entirely once an input is redirected via
+// follows, regardless of whether the redirect's destination happens to also
+// declare an input of the same name. chrest's actual bats node declares only
+// "conformist" and "igloo" — notably NOT "nixpkgs" — so
+// just-us.bats.nixpkgs.bun2nix is doubly dead (traverses the follows *and*
+// its own prefix hop is absent), while just-us.bats.conformist is dead
+// solely because it traverses the follows (chrest's bats does declare
+// "conformist").
+const collapsedFollowsLock = `{
+  "nodes": {
+    "root": { "inputs": { "just-us": "just-us", "chrest": "chrest" } },
+    "just-us": {
+      "inputs": { "bats": ["chrest", "bats"] },
+      "locked": { "type": "github", "owner": "o", "repo": "just-us", "rev": "jjj", "narHash": "sha-j" }
+    },
+    "chrest": {
+      "inputs": { "bats": "bats" },
+      "locked": { "type": "github", "owner": "o", "repo": "chrest", "rev": "ccc", "narHash": "sha-c" }
+    },
+    "bats": {
+      "inputs": { "conformist": "conformist", "igloo": "igloo" },
+      "locked": { "type": "github", "owner": "o", "repo": "bats", "rev": "bbb", "narHash": "sha-b" }
+    },
+    "conformist": { "locked": { "type": "github", "owner": "o", "repo": "conformist", "rev": "cfc", "narHash": "sha-cf" } },
+    "igloo": { "locked": { "type": "github", "owner": "o", "repo": "igloo", "rev": "iii", "narHash": "sha-i" } }
+  },
+  "root": "root",
+  "version": 7
+}`
+
+// TestDeadOverridesFlagsOverridesBeneathFollowedInput is the offline
+// (DeadOverrides, root-resolved) regression for #30: overrides nested
+// beneath just-us's now-followed `bats` input are flagged dead, the
+// collapse binding itself is untouched, and a legitimate override reached
+// through a real (non-followed) node edge is still correctly left alone.
+func TestDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T) {
+	l, err := flakelock.Parse([]byte(collapsedFollowsLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := DeadOverrides(l, []string{
+		`inputs.just-us.inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`, // dead: traverses just-us's followed bats, AND chrest's bats has no nixpkgs
+		`inputs.just-us.inputs.bats.inputs.conformist.follows`,             // dead: traverses just-us's followed bats (chrest's bats declaring "conformist" is irrelevant — the redirect is never reached through this path)
+		`inputs.just-us.inputs.bats.follows`,                               // live: this IS the collapse binding, not a nested override
+		`inputs.chrest.inputs.bats.inputs.igloo.follows`,                   // live: chrest.bats is a real node edge (not followed), and its bats declares igloo
+		`inputs.chrest.inputs.bats.inputs.gone.follows`,                    // dead: real node edge, but chrest's bats has no "gone" (the pre-existing absent-input case, unaffected by this fix)
+	})
+	want := map[string]bool{
+		`inputs.just-us.inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`: true,
+		`inputs.just-us.inputs.bats.inputs.conformist.follows`:             true,
+		`inputs.chrest.inputs.bats.inputs.gone.follows`:                    true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("want %d dead overrides, got %d: %+v", len(want), len(got), got)
+	}
+	for _, d := range got {
+		if !want[d.Override] {
+			t.Errorf("unexpected dead override: %s", d.Override)
+		}
+		if !d.Direct {
+			t.Errorf("Direct = false for %s, want true", d.Override)
+		}
+	}
+}
+
+// TestTransitiveDeadOverridesFlagsOverridesBeneathFollowedInput is the
+// --online analogue of the above: TransitiveDeadOverrides shares
+// resolveOverrideFrom, so an upstream flake's own overrides beneath a
+// followed input must be caught the same way, starting resolution from
+// just-us itself rather than root.
+func TestTransitiveDeadOverridesFlagsOverridesBeneathFollowedInput(t *testing.T) {
+	l, err := flakelock.Parse([]byte(collapsedFollowsLock))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := TransitiveDeadOverrides(l, "just-us", []string{
+		`inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`, // dead: traverses just-us's followed bats
+		`inputs.bats.inputs.conformist.follows`,             // dead: same
+	}, "o/just-us")
+	if len(got) != 2 {
+		t.Fatalf("want 2 transitive dead overrides, got %d: %+v", len(got), got)
+	}
+	// Target is always the override's full prefix chain (every intermediate
+	// hop, not just the one where the followed edge was found) — the same
+	// contract the pre-existing "absent input" dead-override path already
+	// has, so a 3-element chain's Target is 2 segments deep even though
+	// resolution stopped at the first ("bats").
+	wantTarget := map[string]string{
+		`inputs.bats.inputs.nixpkgs.inputs.bun2nix.follows`: "bats/nixpkgs",
+		`inputs.bats.inputs.conformist.follows`:             "bats",
+	}
+	for _, d := range got {
+		if d.Direct {
+			t.Errorf("transitive override must have Direct=false: %+v", d)
+		}
+		if d.Via != "o/just-us" {
+			t.Errorf("Via = %q, want o/just-us", d.Via)
+		}
+		if want, ok := wantTarget[d.Override]; ok && d.Target != want {
+			t.Errorf("Target for %s = %q, want %q", d.Override, d.Target, want)
+		}
+	}
+}
+
 // multiVersionLock: two distinct revs of NixOS/nixpkgs reachable from root.
 const multiVersionLock = `{
   "nodes": {

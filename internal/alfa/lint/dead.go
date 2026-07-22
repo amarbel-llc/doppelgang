@@ -33,15 +33,18 @@ type DeadOverride struct {
 
 // DeadOverrides resolves each override (a full-form `inputs.<dep>…inputs.<x>.follows`
 // attr-path string, as produced from a flake.nix) against the lock and returns
-// those that are dead: the overridden input <x> is absent from the declared
-// inputs of the node the override's prefix chain resolves to from root.
+// those that are dead: either the overridden input <x> is absent from the
+// declared inputs of the node the override's prefix chain resolves to from
+// root, or the chain traverses a followed input along the way (see
+// resolveOverrideFrom).
 //
 // It is deliberately conservative — any override it cannot confidently resolve
 // (malformed shape, a dependency that is not a node input of root, an
-// intermediate hop that is not a node edge) is skipped rather than flagged, so
-// it never reports a false positive. Results are tagged Direct because the
-// overrides come from the linted flake.nix; the transitive (upstream) path
-// tags its findings separately. Output is sorted by Override for determinism.
+// intermediate hop naming an input its node doesn't declare at all) is
+// skipped rather than flagged, so it never reports a false positive. Results
+// are tagged Direct because the overrides come from the linted flake.nix; the
+// transitive (upstream) path tags its findings separately. Output is sorted
+// by Override for determinism.
 func DeadOverrides(l *flakelock.Lock, overrides []string) []DeadOverride {
 	out := make([]DeadOverride, 0)
 	for _, ov := range overrides {
@@ -139,7 +142,21 @@ func resolveOverride(l *flakelock.Lock, chain []string) (target []string, dead, 
 // final element is absent from the reached node's declared inputs (its Inputs
 // keys, which include both node edges and legitimate follows arrays). target
 // is the resolved prefix path. ok is false when the prefix cannot be fully
-// resolved to a node — caller skips those rather than risk a false positive.
+// resolved at all (an intermediate hop names an input the current node
+// doesn't declare) — caller skips those rather than risk a false positive.
+//
+// A prefix hop that is itself a follows-redirect (array-form InputRef, no
+// Node) short-circuits to dead=true rather than resolving through it: once
+// nix redirects an input via `follows`, that input's own subtree is never
+// evaluated, so any override declared beneath it — however it reads
+// syntactically, whatever name it targets — is inert, the same "has an
+// override for a non-existent input" nix warns on for a directly-absent
+// target. This is true regardless of whether the redirect's destination
+// happens to also declare an input of the same name; the override's
+// original path never reaches it. (#30 — collapsing an input via `follows
+// --fix` previously left every override nested beneath it undetected as
+// dead, in both DeadOverrides and TransitiveDeadOverrides, since they share
+// this walk.)
 func resolveOverrideFrom(l *flakelock.Lock, startKey string, chain []string) (target []string, dead, ok bool) {
 	cur := startKey
 	prefix := chain[:len(chain)-1]
@@ -149,8 +166,11 @@ func resolveOverrideFrom(l *flakelock.Lock, startKey string, chain []string) (ta
 			return nil, false, false
 		}
 		ref, has := node.Inputs[name]
-		if !has || ref.Node == "" {
+		if !has {
 			return nil, false, false
+		}
+		if ref.Node == "" {
+			return prefix, true, true
 		}
 		cur = ref.Node
 	}
