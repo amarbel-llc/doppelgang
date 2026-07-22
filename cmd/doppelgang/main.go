@@ -505,6 +505,17 @@ func directDeadOverrideTargets(r lint.Report) []string {
 	return targets
 }
 
+// reportPrunedOverrides writes lintFix's stderr progress line for a batch of
+// pruned dead follows overrides — the headline plus one indented line per
+// binding — shared by the initial fix and the convergence loop's rounds so
+// both report identically.
+func reportPrunedOverrides(headline string, removed []string) {
+	fmt.Fprintf(os.Stderr, "%s\n", headline)
+	for _, l := range removed {
+		fmt.Fprintf(os.Stderr, "    %s\n", l)
+	}
+}
+
 // lintFix applies the auto-fixable edits from report to <flakeDir>/flake.nix
 // — splicing in follows-opportunity lines, pruning direct dead follows
 // overrides, pinning nixpkgs-master, rewriting non-canonical input URLs, and
@@ -694,10 +705,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			}
 		}
 		if len(removed) > 0 {
-			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pruned %d dead follows override(s) from %s:\n", len(removed), nixPath)
-			for _, l := range removed {
-				fmt.Fprintf(os.Stderr, "    %s\n", l)
-			}
+			reportPrunedOverrides(fmt.Sprintf("doppelgang lint --fix: pruned %d dead follows override(s) from %s:", len(removed), nixPath), removed)
 		}
 		if nixpkgsMasterChanged {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: pinned nixpkgs-master in %s to %s\n", nixPath, nixpkgsMasterURL)
@@ -743,22 +751,31 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// total rounds (this one plus a few more). Convergence is guaranteed in
 	// principle (each round strictly removes bindings from a finite file, so
 	// the loop can run at most as many rounds as there are overrides to
-	// prune); the round cap is a defensive bound, not an expected outcome.
-	// Breaking out early when a round makes no progress (moreTargets or
-	// removedMore empty) avoids spinning without result — the unmodified
-	// tail checks below then report whatever's still in `after` exactly as
-	// they already do for a single-round fix.
+	// prune); the round cap is a defensive bound, not an expected outcome —
+	// and matches #31's own ask for one, as a safety net around a loop that
+	// shells out to `nix flake lock` each round. Breaking out early when a
+	// round makes no progress (moreTargets or removedMore empty) avoids
+	// spinning without result — the unmodified tail checks below then report
+	// whatever's still in `after` exactly as they already do for a
+	// single-round fix.
+	//
+	// `out` already holds exactly what's on nixPath at this point (freshly
+	// written above, or unchanged from `src` if nothing applied), so each
+	// round reuses it in place of re-reading the file — its content cannot
+	// have changed underneath us between rounds. relock() and analyzeFlake()
+	// stay real disk/subprocess round-trips rather than assuming their
+	// result: a dead override is provably absent from the lock graph, but
+	// betting the loop's correctness on that inference — instead of letting
+	// `nix flake lock` and a fresh parse confirm it — trades a rarely-hit
+	// loop's cost for a shortcut this package's own newly-added semantics
+	// would be the sole guarantee of.
+	loopChanged := false
 	for fixRound := 2; sel.Has(lint.CheckDeadOverrides) && len(after.DeadOverrides) > 0 && fixRound <= maxFixRounds; fixRound++ {
 		moreTargets := directDeadOverrideTargets(after)
 		if len(moreTargets) == 0 {
 			break // remaining findings are transitive-only; not ours to prune here
 		}
-		curSrc, err := os.ReadFile(nixPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: read %s: %v\n", fixRound, nixPath, err)
-			return 1
-		}
-		nextOut, removedMore, err := nixedit.DeleteBindings(curSrc, moreTargets)
+		nextOut, removedMore, err := nixedit.DeleteBindings(out, moreTargets)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: could not prune newly-exposed dead override(s) from %s automatically (%v).\n"+
 				"Remove the dead follows line(s) above by hand, then re-run `nix flake lock`.\n", fixRound, nixPath, err)
@@ -767,24 +784,25 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		if len(removedMore) == 0 {
 			break // targets didn't match actual bindings; avoid spinning without progress
 		}
-		if err := os.WriteFile(nixPath, nextOut, 0o644); err != nil {
+		out = nextOut
+		if err := os.WriteFile(nixPath, out, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: write %s: %v\n", fixRound, nixPath, err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: pruned %d dead follows override(s) exposed by the previous round's collapse from %s:\n", fixRound, len(removedMore), nixPath)
-		for _, l := range removedMore {
-			fmt.Fprintf(os.Stderr, "    %s\n", l)
-		}
+		reportPrunedOverrides(fmt.Sprintf("doppelgang lint --fix: round %d: pruned %d dead follows override(s) exposed by the previous round's collapse from %s:", fixRound, len(removedMore), nixPath), removedMore)
 		if err := relock(flakeDir); err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: re-lock failed: %v\n", fixRound, err)
 			return 1
 		}
-		stageFixedFiles(flakeDir)
+		loopChanged = true
 		after, err = analyzeFlake(ctx, flakeDir, sel, false, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: re-analyze: %v\n", fixRound, err)
 			return 1
 		}
+	}
+	if loopChanged {
+		stageFixedFiles(flakeDir)
 	}
 
 	if sel.Has(lint.CheckFollows) && len(after.Follows) > 0 {

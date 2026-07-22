@@ -251,6 +251,58 @@ func TestLintDeadOverridesRendering(t *testing.T) {
 	}
 }
 
+// TestLintDeadOverridesRenderingViaFollow covers #30/#32's second dead
+// reason: an override whose path traverses a followed input. Target may
+// legitimately declare Input here (the fixture sets Input to something
+// deliberately plausible-looking), so the rendered text must NOT claim
+// Target has no such input — that would assert something false about the
+// flake graph — and both text and NDJSON must carry the distinct message.
+func TestLintDeadOverridesRenderingViaFollow(t *testing.T) {
+	rep := lint.Report{
+		DeadOverrides: []lint.DeadOverride{{
+			Override:  `inputs.just-us.inputs.bats.inputs.conformist.follows`,
+			Target:    "just-us/bats",
+			Input:     "conformist",
+			Direct:    true,
+			ViaFollow: true,
+		}},
+	}
+
+	var text bytes.Buffer
+	if err := LintText(&text, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	ts := text.String()
+	if !strings.Contains(ts, `inputs.just-us.inputs.bats.inputs.conformist.follows: "just-us/bats" is unreachable — its path traverses a followed input (direct)`) {
+		t.Errorf("viaFollow dead-override line missing/wrong:\n%s", ts)
+	}
+	if strings.Contains(ts, `has no input`) {
+		t.Errorf("viaFollow override must not render the ordinary \"has no input\" message (Target may legitimately declare Input):\n%s", ts)
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, LintSummary{Report: rep}); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	recs := decodeNDJSON(t, nd.Bytes())
+	dead := recs[3]
+	if len(dead.Subtest) != 1 {
+		t.Fatalf("want 1 dead subtest, got %d", len(dead.Subtest))
+	}
+	if strings.Contains(dead.Subtest[0].Description, "has no input") {
+		t.Errorf("viaFollow NDJSON description must not use the ordinary message: %q", dead.Subtest[0].Description)
+	}
+	var dd struct {
+		ViaFollow bool `json:"viaFollow"`
+	}
+	if err := json.Unmarshal(dead.Subtest[0].Diagnostic, &dd); err != nil {
+		t.Fatalf("dead subtest diagnostic is not an object: %v", err)
+	}
+	if !dd.ViaFollow {
+		t.Errorf("diagnostic viaFollow = false, want true")
+	}
+}
+
 // reportAllThree is a report with a finding in every check category, used
 // to prove the --checks selection excludes a deselected check from both the
 // count and the emitted records.

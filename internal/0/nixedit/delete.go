@@ -163,29 +163,12 @@ func deleteSpan(src []byte, kvStart, kvEnd int) span {
 			j++
 		}
 		start := lineStart(src, kvStart)
-		if precedingLineBlank(src, start) {
+		if line, ok := precedingLine(src, start); ok && line == "" {
 			j = skipBlankLines(src, j)
 		}
 		return span{start: start, end: j}
 	}
 	return span{start: kvStart, end: end}
-}
-
-// precedingLineBlank reports whether the line immediately before byte
-// offset off — which must itself be a line start — is blank (whitespace-only,
-// possibly empty). Returns false when off is the file's first line (no
-// preceding line to check).
-func precedingLineBlank(src []byte, off int) bool {
-	if off == 0 || src[off-1] != '\n' {
-		return false
-	}
-	prevStart := lineStart(src, off-1)
-	for i := prevStart; i < off-1; i++ {
-		if src[i] != ' ' && src[i] != '\t' && src[i] != '\r' {
-			return false
-		}
-	}
-	return true
 }
 
 // skipBlankLines advances off past every immediately-following blank line
