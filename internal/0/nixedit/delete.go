@@ -135,6 +135,14 @@ func locateBindings(matcher langlang.Matcher, attrsetSrc []byte, base int, prefi
 // the line's leading indent and its trailing newline are included so the line
 // vanishes without leaving a blank scar. Otherwise only the binding text and
 // its `;` are removed, preserving surrounding layout.
+//
+// When such an own-line binding also sits in its own blank-line-separated
+// paragraph (a blank line both before and after it — how a scattered follows
+// line typically lands, hand-added or left behind by a collapse), deleting
+// only the binding's line would merge those two flanking blank lines into a
+// run of 2+, which nixfmt collapses back to one on its next run — breaking
+// the nixfmt-stability of --fix's output (#27). So the following blank-line
+// run is swallowed too, leaving just the one blank line already before it.
 func deleteSpan(src []byte, kvStart, kvEnd int) span {
 	end := afterSemicolon(src, kvEnd)
 	ownLine := onlyBlankBefore(src, kvStart)
@@ -154,7 +162,48 @@ func deleteSpan(src []byte, kvStart, kvEnd int) span {
 		if j < len(src) && src[j] == '\n' {
 			j++
 		}
-		return span{start: lineStart(src, kvStart), end: j}
+		start := lineStart(src, kvStart)
+		if precedingLineBlank(src, start) {
+			j = skipBlankLines(src, j)
+		}
+		return span{start: start, end: j}
 	}
 	return span{start: kvStart, end: end}
+}
+
+// precedingLineBlank reports whether the line immediately before byte
+// offset off — which must itself be a line start — is blank (whitespace-only,
+// possibly empty). Returns false when off is the file's first line (no
+// preceding line to check).
+func precedingLineBlank(src []byte, off int) bool {
+	if off == 0 || src[off-1] != '\n' {
+		return false
+	}
+	prevStart := lineStart(src, off-1)
+	for i := prevStart; i < off-1; i++ {
+		if src[i] != ' ' && src[i] != '\t' && src[i] != '\r' {
+			return false
+		}
+	}
+	return true
+}
+
+// skipBlankLines advances off past every immediately-following blank line
+// (whitespace-only content through its terminating '\n'), stopping at the
+// first non-blank line or end of file. Returns off unchanged if the line
+// starting there is not blank.
+func skipBlankLines(src []byte, off int) int {
+	for {
+		i := off
+		for i < len(src) && src[i] != '\n' {
+			if src[i] != ' ' && src[i] != '\t' && src[i] != '\r' {
+				return off
+			}
+			i++
+		}
+		if i >= len(src) {
+			return off
+		}
+		off = i + 1
+	}
 }

@@ -1,6 +1,7 @@
 package nixedit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -199,6 +200,89 @@ func TestCanonicalFormFixReachesFixedPoint(t *testing.T) {
 	}
 	if _, migrated, err := MigrateLegacySentinel(fixed); err != nil || migrated {
 		t.Errorf("second pass migrated=%v err=%v, want no-op (already structured)", migrated, err)
+	}
+}
+
+// TestCanonicalFormFixNixfmtStableAtRealWorldScale drives --fix over a
+// synthetic flake built at real-world scale — 32 inputs, blank-line-
+// separated paragraphs (the natural style for a hand-maintained inputs
+// block), long multi-line comments, and several follows bindings scattered
+// far from their input's own paragraph, each isolated as its own
+// blank-line-surrounded entry (how a hand-added or `follows --fix`-collapsed
+// line typically lands). This is the scale FDR 0007's nixfmt-stability
+// acceptance property was tested against too thinly at (#27): fixtures
+// small enough that a scattered line's deletion never left behind more
+// than one flanking blank line, so the resulting run-of-2+-blank-lines scar
+// (which nixfmt-rfc-style collapses back to one on its next run, making
+// --fix's own output nixfmt-unstable) went uncaught.
+func TestCanonicalFormFixNixfmtStableAtRealWorldScale(t *testing.T) {
+	names := []string{
+		"igloo", "nixpkgs-master", "utils", "conformist", "chrest", "chix",
+		"folio", "freud", "get-hubbed", "grit", "hamster", "jq",
+		"just-us-agents", "man", "rg", "sisyphus", "stats-me", "parley",
+		"nebulous", "arboretum", "env", "slip", "smith", "dodder",
+		"clown", "moxy", "spinclass", "troupe", "juggler", "cutting-garden",
+		"bats", "bun2nix",
+	}
+	comments := map[string]string{
+		"igloo": "# igloo is the shared nixpkgs overlay + lib used across every\n" +
+			"    # eng repo; bumping it is a coordinated, fleet-wide operation.",
+		"chrest": "# chrest drives the browser-automation MCP surface.",
+	}
+	// Bindings that already sit adjacent to their input's url (canonical).
+	adjacentFollows := map[string][2]string{
+		"chrest": {"nixpkgs-master", "nixpkgs-master"},
+		"utils":  {"systems", "igloo/systems"},
+	}
+	// Scattered bindings, each written as its own blank-line-isolated
+	// paragraph near the bottom of the block.
+	scatteredFollows := []struct{ input, target, rhs string }{
+		{"igloo", "nixpkgs-master", "nixpkgs-master"},
+		{"conformist", "igloo", "igloo"},
+		{"just-us-agents", "bats", "chrest/bats"},
+		{"cutting-garden", "nixpkgs-master", "nixpkgs-master"},
+		{"dodder", "utils", "utils"},
+	}
+
+	var b strings.Builder
+	b.WriteString("{\n  description = \"eng-like: a real-world-scale fixture\";\n\n")
+	b.WriteString("  # doppelgang: canonical\n  inputs = {\n")
+	for i, n := range names {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if c, ok := comments[n]; ok {
+			b.WriteString("    " + c + "\n")
+		}
+		fmt.Fprintf(&b, "    %s.url = \"github:linenisgreat/%s\";\n", n, n)
+		if f, ok := adjacentFollows[n]; ok {
+			fmt.Fprintf(&b, "    %s.inputs.%s.follows = \"%s\";\n", n, f[0], f[1])
+		}
+	}
+	b.WriteString("\n")
+	for _, sf := range scatteredFollows {
+		fmt.Fprintf(&b, "    %s.inputs.%s.follows = \"%s\";\n", sf.input, sf.target, sf.rhs)
+		b.WriteString("\n")
+	}
+	b.WriteString("  };\n\n  outputs = { self, igloo, ... }@inputs: { };\n}\n")
+	src := b.String()
+
+	fixed := runCanonicalFormFix(t, []byte(src))
+
+	report, err := CanonicalForm(fixed)
+	if err != nil {
+		t.Fatalf("CanonicalForm after fix: %v", err)
+	}
+	if len(report.Scattered) != 0 {
+		t.Fatalf("still scattered after fix: %v\n%s", report.Scattered, fixed)
+	}
+	// nixfmt-rfc-style collapses any run of 2+ consecutive blank lines
+	// down to exactly one — verified directly against the real nixfmt
+	// binary during this fix's development. A run of 2+ in --fix's own
+	// output is exactly the layout nixfmt would still reformat, so its
+	// absence is the acceptance property's byte-level proxy.
+	if strings.Contains(string(fixed), "\n\n\n") {
+		t.Errorf("--fix output contains a run of 2+ blank lines (not nixfmt-stable):\n%s", fixed)
 	}
 }
 
