@@ -286,6 +286,43 @@ func TestMigrateLegacySentinelPreservesIndent(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacySentinelPreservesCRLF confirms that on a CRLF-terminated
+// flake.nix, the rewritten directive line stays CRLF-terminated like every
+// other line in the file — regression test for #28, where the byte-range
+// replace excised the sentinel line's trailing '\r' without reinserting it,
+// leaving that one line LF-terminated in an otherwise-CRLF file.
+func TestMigrateLegacySentinelPreservesCRLF(t *testing.T) {
+	src := "{\r\n" +
+		"  # canonical-form\r\n" +
+		"  inputs = {\r\n" +
+		"    igloo.url = \"github:amarbel-llc/igloo\";\r\n" +
+		"  };\r\n" +
+		"  outputs = { self }: { };\r\n" +
+		"}\r\n"
+	out, changed, err := MigrateLegacySentinel([]byte(src))
+	if err != nil {
+		t.Fatalf("MigrateLegacySentinel: %v", err)
+	}
+	if !changed {
+		t.Fatalf("changed = false, want true")
+	}
+	s := string(out)
+	if !strings.Contains(s, "\r\n  # doppelgang: canonical\r\n") {
+		t.Errorf("directive line not CRLF-terminated:\n%q", s)
+	}
+	if strings.Contains(s, "canonical\n") && !strings.Contains(s, "canonical\r\n") {
+		t.Errorf("directive line is bare-LF-terminated in a CRLF file:\n%q", s)
+	}
+	for i, line := range strings.Split(s, "\n") {
+		if line == "" {
+			continue // trailing split artifact after the final \n
+		}
+		if !strings.HasSuffix(line, "\r") {
+			t.Errorf("line %d not CRLF-terminated: %q\nfull output:\n%q", i, line, s)
+		}
+	}
+}
+
 // TestMigrateLegacySentinelNoopCases confirms MigrateLegacySentinel is a
 // byte-for-byte no-op both when the flake already uses the structured
 // directive and when it has not opted in at all.

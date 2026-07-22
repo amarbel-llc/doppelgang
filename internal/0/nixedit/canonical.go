@@ -82,7 +82,16 @@ func MigrateLegacySentinel(src []byte) (out []byte, changed bool, err error) {
 	// line's last byte) rather than prevLineStart (which IS the indent's
 	// start, yielding an empty measurement).
 	indent := lineIndent(src, prevLineEnd)
-	out = spliceRange(src, prevLineStart, prevLineEnd, indent+"# "+directivePrefix+" "+CanonicalFormDirective)
+	replaceEnd := prevLineEnd
+	if replaceEnd > prevLineStart && src[replaceEnd-1] == '\r' {
+		// CRLF line ending: the '\r' sits just before prevLineEnd and is
+		// the line's terminator, not sentinel content. Exclude it from the
+		// replaced range so it survives untouched in the tail alongside
+		// the '\n', keeping this line CRLF like its neighbors — mirrors
+		// deleteSpan's CRLF handling in delete.go.
+		replaceEnd--
+	}
+	out = spliceRange(src, prevLineStart, replaceEnd, indent+"# "+directivePrefix+" "+CanonicalFormDirective)
 	return out, true, nil
 }
 
