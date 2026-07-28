@@ -23,7 +23,13 @@ lint-fmt:
   nix build ".#checks.${system}.formatting" --no-link --print-build-logs
 
 # Impure eng checks (git remotes, sweatfile, agents-md) against the working
-# tree; conformist comes from the devShell PATH.
+# tree. The binary comes from `.#conformist`, NOT from PATH: eng's
+# home-profile wrapper (conformistCwd) also installs a `conformist`, and it
+# gates on a checked-in conformist.toml/.conformist.toml/treelint.toml at the
+# git root, exiting 2 before it ever reads --config-file. No eng repo carries
+# one — the config is Nix-generated (.#conformist-impure-config) — so whenever
+# the profile bin wins the PATH race (any run outside the devShell) a bare
+# `conformist` fails this lane. `nix run` makes it PATH-order independent.
 #
 # run the impure eng checks against the working tree
 [group('lint')]
@@ -31,7 +37,7 @@ lint-worktree:
   #!/usr/bin/env bash
   set -euo pipefail
   cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
-  conformist check --config-file "$cfg" --tree-root .
+  nix run '.#conformist' -- check --config-file "$cfg" --tree-root .
 
 # Self-consume: run `doppelgang lint` against this repo's own flake.lock.
 # Surfaces follows opportunities and multi-version inputs in our own

@@ -114,6 +114,12 @@
           inherit doppelgang;
           default = doppelgang;
           conformist-impure-config = conformistImpureEval.config.build.configFile;
+          # The raw conformist binary, so `just lint-worktree` can
+          # `nix run .#conformist -- check ...` instead of resolving
+          # `conformist` from PATH — where eng's cwd-aware wrapper
+          # (conformistCwd) would shadow it and refuse, since it gates on a
+          # checked-in conformist.toml that no eng repo carries.
+          conformist = conformistPkg;
           conformist-pre-commit = conformistEval.config.build.preCommit;
           conformist-repair = conformistEval.config.build.repair;
         };
