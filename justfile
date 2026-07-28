@@ -13,6 +13,8 @@ clean: clean-build
 # Read-only formatting + the eng presets' file-based linters, via the sandboxed
 # checks.formatting derivation. Does NOT modify files — the modifying
 # counterpart is `codemod-fmt`.
+#
+# check formatting and the eng file-based linters read-only
 [group('lint')]
 lint-fmt:
   #!/usr/bin/env bash
@@ -22,6 +24,8 @@ lint-fmt:
 
 # Impure eng checks (git remotes, sweatfile, agents-md) against the working
 # tree; conformist comes from the devShell PATH.
+#
+# run the impure eng checks against the working tree
 [group('lint')]
 lint-worktree:
   #!/usr/bin/env bash
@@ -32,6 +36,8 @@ lint-worktree:
 # Self-consume: run `doppelgang lint` against this repo's own flake.lock.
 # Surfaces follows opportunities and multi-version inputs in our own
 # inputs. Recipe (and `just`) fails when lint reports findings.
+#
+# run `doppelgang lint` against this repo's own flake.lock
 [group('lint')]
 lint-flake: build-nix
   ./result/bin/doppelgang lint
@@ -39,12 +45,16 @@ lint-flake: build-nix
 # Build the doppelgang binary via nix. The amarbel-llc/nixpkgs fork's
 # buildGoApplication overlay burns the version + commit into the binary via
 # -ldflags, which a raw `go build` would not. Always use this.
+#
+# build the doppelgang binary via nix
 [group('build')]
 build-nix:
   nix build --show-trace
 
 # Run go test via the flake's checks output so the suite executes in a
 # sandboxed nix build (checks.<system>.go-test in flake.nix).
+#
+# run the Go test suite via the flake's checks output
 [group('test')]
 test-go:
   nix flake check --show-trace
@@ -53,6 +63,8 @@ test-go:
 # (seconds, sees untracked files) rather than the nix sandbox. The
 # authoritative sandboxed run is `test-go` (`nix flake check`).
 # Usage: just debug-go-test-pkg internal/alfa/lint
+#
+# run `go test` for a single package in the devshell
 [group('debug')]
 debug-go-test-pkg PKG:
   go test ./{{PKG}}/...
@@ -76,6 +88,8 @@ clean-build:
 # directory. Used for ad-hoc validation of lint output against external
 # fixtures (e.g. /tmp/claude-madder-* snapshots during the FDR-0002
 # promotion checks). Exits 1 on findings.
+#
+# run `doppelgang lint` against an arbitrary flake directory
 [group('explore')]
 explore-lint-flake DIR: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}}
@@ -84,6 +98,8 @@ explore-lint-flake DIR: build-nix
 # transitive dead-override detection, which fetches upstream flake.nix files
 # over the network. DIR defaults to this repo. Used to validate transitive
 # detection against real closures (e.g. issue #11's conformist/moxy/posh).
+#
+# run `doppelgang lint --online` against a flake directory
 [group('explore')]
 explore-lint-online DIR=".": build-nix
   ./result/bin/doppelgang lint --online --format text --flake {{DIR}}
@@ -92,6 +108,8 @@ explore-lint-online DIR=".": build-nix
 # directory: apply the follows-opportunity edits to its flake.nix and
 # re-lock. Used to validate the --fix repair path end-to-end against a
 # fixture flake with a known duplicate.
+#
+# run `doppelgang lint --fix` against an arbitrary flake directory
 [group('explore')]
 explore-lint-fix DIR: build-nix
   ./result/bin/doppelgang lint --fix --flake {{DIR}}
@@ -101,6 +119,8 @@ explore-lint-fix DIR: build-nix
 # checks gate the non-zero exit, and (with `--format ndjson`) the plan count.
 # CHECKS is the comma-separated subset; pass extra args after `--`, e.g.
 # `just explore-lint-checks /tmp/flake follows,dead-overrides -- --format ndjson`.
+#
+# run `doppelgang lint --checks` against a flake directory and report the exit code
 [group('explore')]
 explore-lint-checks DIR CHECKS *ARGS: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks {{CHECKS}} {{ARGS}}; echo "exit=$?"
@@ -110,12 +130,16 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 # nixpkgs-master input in <DIR>/flake.nix to <SHA> (splices it when missing,
 # rewrites when floating), editing flake.nix only (no re-lock; the caller
 # re-locks). Reports the exit code. SHA must be a 40-hex nixpkgs revision.
+#
+# run the nixpkgs-master convention repair against a flake directory
 [group('explore')]
 explore-lint-nixpkgs-master DIR SHA: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks nixpkgs-master --fix --nixpkgs-master-sha {{SHA}} --format text; echo "exit=$?"
 
 # Tag a doppelgang release. The "v" prefix is added for you, so pass the
 # semver without it. Usage: just tag 0.1.0 "feat: initial release"
+#
+# tag a doppelgang release
 tag version message:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -136,6 +160,8 @@ tag version message:
 # by the amarbel-llc fork's buildGoApplication overlay), so version.env is the
 # single source of truth. No-op if already at the target version. Usage:
 # just bump-version 0.0.2
+#
+# rewrite DOPPELGANG_VERSION in version.env to the given semver
 bump-version new_version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -155,6 +181,8 @@ bump-version new_version:
 #
 # Use `just tag <version> <message>` directly if you want to control the
 # commit message yourself without bumping.
+#
+# cut a release: bump version.env, commit, push master, then sign and push the tag
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
