@@ -69,17 +69,17 @@ test-go:
 debug-go-test-pkg PKG:
   go test ./{{PKG}}/...
 
-# Format the tree in place (repair mode) via `nix fmt`.
+# format the tree in place (repair mode) via `nix fmt`
 [group('codemod')]
 codemod-fmt:
   nix fmt
 
-# Regenerate gomod2nix.toml after go.mod / go.sum changes.
+# regenerate gomod2nix.toml after go.mod / go.sum changes
 [group('build')]
 build-gomod2nix:
   gomod2nix
 
-# Remove build out-links.
+# remove build out-links
 [group('clean')]
 clean-build:
   rm -rf result result-*
