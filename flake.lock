@@ -46,10 +46,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784649683,
-        "narHash": "sha256-q3/pXh1iyYqb3TCkZfMLYgY3bFMLP+X0h6CrraWdZCA=",
+        "lastModified": 1785332762,
+        "narHash": "sha256-p47St+gV504shWmEj+5nzZio+Tu2f4HaUmTyLyABCCU=",
+        "rev": "372ac68dfe3717eb46bf8033d86f5e7cda1a43c2",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/conformist/archive/e04044f7f9df19e9df18156f800165bc9e28881a.tar.gz"
+        "url": "https://code.linenisgreat.com/conformist/archive/372ac68dfe3717eb46bf8033d86f5e7cda1a43c2.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -88,10 +89,11 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1784650356,
-        "narHash": "sha256-1t7KRC4W/Z6XW92QMbfi9CBPatFAAADKLJbAePiE+AA=",
+        "lastModified": 1785249252,
+        "narHash": "sha256-sYKk1RiTgbF1cha8lQsUzFRn8BpYTxupyzOCCrRSZD0=",
+        "rev": "ccb50c7f53ca67e6eba59ebaf3f602ff20d2100f",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/igloo/archive/b33e4110475773b342a44570b8912c7c684d065e.tar.gz"
+        "url": "https://code.linenisgreat.com/igloo/archive/ccb50c7f53ca67e6eba59ebaf3f602ff20d2100f.tar.gz"
       },
       "original": {
         "type": "tarball",
