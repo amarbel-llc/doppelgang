@@ -75,6 +75,27 @@ test-go:
 debug-go-test-pkg PKG:
   go test ./{{PKG}}/...
 
+# Evaluate a flake's `outputs` and report the exit code. Used to prove a
+# repaired flake still evaluates — in particular that its outputs signature
+# accepts every declared input, whose failure mode is
+# `error: function 'outputs' called with unexpected argument '<name>'`.
+# Usage: just debug-flake-eval .tmp/troupe-verify
+#
+# evaluate a flake directory's outputs, reporting the exit code
+[group('debug')]
+debug-flake-eval DIR:
+  cd {{ DIR }} && nix flake show --no-write-lock-file 2>&1; echo "exit=$?"
+
+# Verbose single-test dev-loop: `debug-go-test-pkg` hard-codes `/...` and takes
+# no test flags, so it cannot run one test with `-v` (needed to read t.Log
+# output when probing parser/CST behaviour).
+# Usage: just debug-go-test-run internal/0/nixedit TestApplyBlockForm
+#
+# run one `go test` by name, verbosely, in the devshell
+[group('debug')]
+debug-go-test-run PKG RUN:
+  go test ./{{PKG}} -run '{{RUN}}' -v
+
 # format the tree in place (repair mode) via `nix fmt`
 [group('codemod')]
 codemod-fmt:
@@ -89,6 +110,17 @@ build-gomod2nix:
 [group('clean')]
 clean-build:
   rm -rf result result-*
+
+# Run the outputs-participation check against a flake directory, optionally
+# repairing it. Pair with `debug-flake-eval` to confirm a flake that nix
+# rejected with `function 'outputs' called with unexpected argument '<name>'`
+# evaluates after the repair.
+# Usage: just explore-lint-outputs-participation /path/to/flake --fix
+#
+# run the outputs-participation check against a flake directory
+[group('explore')]
+explore-lint-outputs-participation DIR *ARGS: build-nix
+  ./result/bin/doppelgang lint --flake {{ DIR }} --checks outputs-participation --format text {{ ARGS }}; echo "exit=$?"
 
 # Run `doppelgang lint --flake <DIR>` against an arbitrary flake
 # directory. Used for ad-hoc validation of lint output against external

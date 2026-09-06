@@ -42,6 +42,14 @@ type Report struct {
 	// spelling, no scattering), leaves it nil — and Analyze, which
 	// never runs this check, always leaves it nil. See CheckCanonicalForm.
 	CanonicalForm *CanonicalFormFinding
+	// OutputsParticipation is non-nil when the flake declares inputs its
+	// `outputs` signature cannot accept — a closed formals set (no `...`)
+	// missing a declared input, which makes `nix` fail with "function
+	// 'outputs' called with unexpected argument". It is computed from
+	// flake.nix alone (not the lock); a flake whose signature accepts its
+	// inputs — and Analyze, which never runs this check — leaves it nil.
+	// See CheckOutputsParticipation.
+	OutputsParticipation *OutputsParticipationFinding
 }
 
 // FollowsRec recommends collapsing a set of nodes that pin an identical

@@ -147,6 +147,19 @@ func LintText(w io.Writer, s LintSummary) error {
 		}
 	}
 
+	if s.active(lint.CheckOutputsParticipation) {
+		if _, err := fmt.Fprintf(w, "\n── outputs participation ──\n"); err != nil {
+			return err
+		}
+		if s.Report.OutputsParticipation == nil {
+			if _, err := fmt.Fprintln(w, "(the outputs signature accepts every declared input)"); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintln(w, s.Report.OutputsParticipation.String()); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

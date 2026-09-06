@@ -11,8 +11,10 @@ doppelgang dupes [--installable .#default] [--scope runtime|build]
 doppelgang why <regex|/nix/store/...> [--installable .#default]
                                       [--scope runtime|build]
 doppelgang lint [--flake .] [--format auto|text|json|ndjson]
-                [--checks follows,multi-version,dead-overrides,nixpkgs-master]
+                [--checks follows,multi-version,dead-overrides,nixpkgs-master,
+                          canonical-inputs,canonical-form,outputs-participation]
                 [--online] [--fix] [--nixpkgs-master-sha <40-hex>]
+                [--papi-domain <domain>]
 doppelgang version
 ```
 
@@ -74,6 +76,25 @@ check:
   (see below). Selected via `--checks canonical-form` (or `all`). Detection
   reads `flake.nix` alone. See
   `docs/features/0007-canonical-inputs-block.md`.
+- **outputs-participation** (opt-in; not a default check) — flags inputs the
+  flake declares that its `outputs` function cannot accept. Nix passes every
+  declared input to `outputs`, so a formals set that enumerates names with no
+  trailing `...` fails to evaluate on an input it does not name (`error:
+  function 'outputs' called with unexpected argument '<name>'`). `--fix`
+  appends `...` to the argument set. It stays silent when the signature
+  already accepts unnamed inputs (`...` or a simple `inputs:` argument) or
+  when there is no recognisable `outputs` binding. Detection reads
+  `flake.nix` alone — no lock, no network, and no fleet parameter — which is
+  what lets this check run inside a sandboxed gate where `nixpkgs-master`
+  (needs a SHA) and `canonical-inputs` (needs PAPI) cannot. See
+  `docs/features/0008-lint-outputs-participation.md`.
+
+Independently of that check, `--fix` widens a closed `outputs` signature
+whenever a repair may have ADDED an input (the `nixpkgs-master` and
+`canonical-inputs` URL repairs both splice). A repair must never leave behind
+a flake that cannot be evaluated, so this is not gated on selecting
+`outputs-participation`; it is a no-op when the signature already carries
+`...`.
 
 The follows / multi-version analyses are entirely offline. Dead-override
 detection reads `<flake>/flake.nix` too (direct overrides are not recorded in
@@ -112,9 +133,10 @@ into `flake.lock` is left to the caller (eng's cascade runs `nix flake update`
 immediately after). `flake.nix` is still staged.
 
 `--checks` restricts the run to a comma-separated subset of `follows`,
-`multi-version`, `dead-overrides`, and `nixpkgs-master` (default: the first
-three; `all` selects every check including the opt-in `nixpkgs-master`; an
-unknown name exits `2`). The selection gates **everything**: only the chosen
+`multi-version`, `dead-overrides`, `nixpkgs-master`, `canonical-inputs`,
+`canonical-form`, and `outputs-participation` (default: the first three;
+`all` selects every check including the four opt-in ones; an unknown name
+exits `2`). The selection gates **everything**: only the chosen
 checks are rendered (in every `--format`), counted toward the non-zero exit, and
 auto-fixed by `--fix`. This lets a caller gate on a chosen subset — e.g. a flake
 that intentionally pins inputs at multiple revisions can run
@@ -135,8 +157,8 @@ without a flag.
 
 The leading `{"type":"plan","count":N}` record is the schema's normative plan
 record: lint knows its plan up front — `N` is the number of *selected* checks
-(three by default; fewer under a `--checks` subset, or four when `nixpkgs-master`
-is added) — so it announces them as the first record, and the summary's
+(three by default; fewer under a `--checks` subset, more as opt-in checks are
+added) — so it announces them as the first record, and the summary's
 `plan_count` matches that count.
 
 `lint` exits `1` when any *selected* check reports a finding, so it can run in

@@ -11,18 +11,19 @@ import (
 type Check string
 
 const (
-	CheckFollows         Check = "follows"
-	CheckMultiVersion    Check = "multi-version"
-	CheckDeadOverrides   Check = "dead-overrides"
-	CheckNixpkgsMaster   Check = "nixpkgs-master"
-	CheckCanonicalInputs Check = "canonical-inputs"
-	CheckCanonicalForm   Check = "canonical-form"
+	CheckFollows              Check = "follows"
+	CheckMultiVersion         Check = "multi-version"
+	CheckDeadOverrides        Check = "dead-overrides"
+	CheckNixpkgsMaster        Check = "nixpkgs-master"
+	CheckCanonicalInputs      Check = "canonical-inputs"
+	CheckCanonicalForm        Check = "canonical-form"
+	CheckOutputsParticipation Check = "outputs-participation"
 )
 
 // AllChecks is the canonical order of every check. Renderers iterate this
 // and filter by the active Selection so output order is stable regardless
 // of which subset is selected.
-var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, CheckNixpkgsMaster, CheckCanonicalInputs, CheckCanonicalForm}
+var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, CheckNixpkgsMaster, CheckCanonicalInputs, CheckCanonicalForm, CheckOutputsParticipation}
 
 // DefaultChecks is the subset selected when `--checks` is absent — the three
 // flake.lock/flake.nix analyses that need no external parameter. The
@@ -36,8 +37,15 @@ var AllChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides, Che
 // `# doppelgang: canonical` directive comment (the deprecated `# canonical-
 // form` spelling still works too, and `--fix` upgrades it — see FDR 0007) —
 // selecting the check without either spelling present yields no findings.
-// Keeping the default at three also preserves the pre-existing exit-code,
-// output, and NDJSON plan-count behavior for every existing consumer.
+//
+// outputs-participation is likewise opt-in, though for a different reason:
+// unlike the others it flags a hard eval failure rather than a policy or
+// hygiene preference, so it would be defensible in the default set. It is
+// held out only to preserve the pre-existing exit-code, output, and NDJSON
+// plan-count behavior for every existing consumer — the same compatibility
+// promise that keeps the default at three. It is enabled fleet-wide through
+// eng's `settings.linter.doppelgang-flake` stanza instead; promoting it to
+// DefaultChecks is a separate, deliberate call.
 var DefaultChecks = []Check{CheckFollows, CheckMultiVersion, CheckDeadOverrides}
 
 // Selection is the set of enabled checks. The zero value (nil) enables

@@ -162,7 +162,7 @@ func lintMain(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("lint", flag.ExitOnError)
 	flakeDir := fs.String("flake", ".", "directory containing flake.lock")
 	format := fs.String("format", "auto", "output format: auto, text, json, or ndjson (auto = text on a TTY, ndjson otherwise)")
-	checks := fs.String("checks", "", "comma-separated subset of checks to gate on: follows, multi-version, dead-overrides (default all; 'all' is an alias)")
+	checks := fs.String("checks", "", "comma-separated subset of checks to gate on: follows, multi-version, dead-overrides, nixpkgs-master, canonical-inputs, canonical-form, outputs-participation ('all' is an alias; default is the first three)")
 	fix := fs.Bool("fix", false, "apply follows-opportunity edits and prune dead overrides in flake.nix, then re-lock (needs nix on PATH)")
 	online := fs.Bool("online", false, "additionally detect transitive dead overrides by fetching upstream flake.nix files (read-only, best-effort; implied by --fix)")
 	nixpkgsMasterSHA := fs.String("nixpkgs-master-sha", "", "40-hex nixpkgs revision to pin the nixpkgs-master input to; required with --fix when the nixpkgs-master check is selected")
@@ -304,7 +304,29 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 	if sel.Has(lint.CheckCanonicalForm) {
 		report.CanonicalForm = canonicalFormFinding(flakeDir)
 	}
+	if sel.Has(lint.CheckOutputsParticipation) {
+		report.OutputsParticipation = outputsParticipationFinding(flakeDir)
+	}
 	return report, nil
+}
+
+// outputsParticipationFinding reads <flakeDir>/flake.nix and checks that its
+// `outputs` signature can accept every input the flake declares, returning a
+// finding (or nil when it can, or the file is unreadable). An unparseable
+// flake.nix yields nil with a stderr note, mirroring nixpkgsMasterFinding.
+// Detection is fully offline and needs no lock, so it works on a
+// freshly-cloned repo and inside a sandboxed gate.
+func outputsParticipationFinding(flakeDir string) *lint.OutputsParticipationFinding {
+	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	if err != nil {
+		return nil
+	}
+	finding, err := lint.ClassifyOutputsParticipation(src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: flake.nix not parseable; skipping outputs-participation check (%v)\n", err)
+		return nil
+	}
+	return finding
 }
 
 // canonicalFormFinding reads <flakeDir>/flake.nix and classifies its
@@ -468,6 +490,9 @@ func reportHasFindings(r lint.Report, sel lint.Selection) bool {
 	if sel.Has(lint.CheckCanonicalForm) && r.CanonicalForm != nil {
 		return true
 	}
+	if sel.Has(lint.CheckOutputsParticipation) && r.OutputsParticipation != nil {
+		return true
+	}
 	return false
 }
 
@@ -582,8 +607,9 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	fixNixpkgsMaster := sel.Has(lint.CheckNixpkgsMaster) && report.NixpkgsMaster != nil
 	fixCanonicalInputs := sel.Has(lint.CheckCanonicalInputs) && len(report.CanonicalInputs) > 0
 	fixCanonicalForm := sel.Has(lint.CheckCanonicalForm) && report.CanonicalForm != nil
+	fixOutputsParticipation := sel.Has(lint.CheckOutputsParticipation) && report.OutputsParticipation != nil
 
-	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster && !fixCanonicalInputs && !fixCanonicalForm {
+	if len(followsLines) == 0 && len(deadTargets) == 0 && !fixNixpkgsMaster && !fixCanonicalInputs && !fixCanonicalForm && !fixOutputsParticipation {
 		if remaining := reportOnlyCount(report, sel); remaining > 0 {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: nothing auto-fixable; %d report-only finding(s) remain (multi-version inputs and/or transitive dead overrides)\n", remaining)
 			return 1
@@ -683,13 +709,51 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 		}
 	}
 
+	// Widening the `outputs` signature is BOTH the outputs-participation
+	// repair and a safety invariant of every edit above that can ADD an
+	// input. Nix passes each declared input to `outputs`, so splicing one
+	// into a flake whose formals enumerate names with no `...` yields a flake
+	// that no longer evaluates:
+	//
+	//	error: function 'outputs' called with unexpected argument 'nixpkgs-master'
+	//
+	// That is exactly how the fleet's self-onboarding pass
+	// (`--fix --checks nixpkgs-master,canonical-inputs`) broke a repo whose
+	// outputs argument list was closed. So the widening runs whenever an
+	// input may have been spliced, not only when the check is selected —
+	// a repair must never leave behind a flake that cannot be evaluated.
+	// The widening is gated on the violation actually being present in the
+	// edited text, not merely on an input-adding repair having run: a flake
+	// whose closed formals already name every input it declares is valid, and
+	// adding `...` to it would be an edit nobody asked for.
+	outputsWidened := false
+	if fixOutputsParticipation || nixpkgsMasterChanged || canonicalURLsRewritten > 0 {
+		violation, cErr := lint.ClassifyOutputsParticipation(out)
+		if cErr != nil {
+			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not check the outputs signature in %s (%v); leaving it alone\n", nixPath, cErr)
+		} else if violation != nil {
+			out, outputsWidened, err = nixedit.WidenOutputsFormals(out)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not widen the outputs signature in %s automatically (%v).\n"+
+					"Add `...` to the `outputs = { … }:` argument set by hand so it accepts %s.\n",
+					nixPath, err, strings.Join(violation.Missing, ", "))
+				return 1
+			}
+			if outputsWidened {
+				fmt.Fprintf(os.Stderr, "doppelgang lint --fix: widened the outputs signature in %s with `...` so it accepts declared input(s) %s\n",
+					nixPath, strings.Join(violation.Missing, ", "))
+			}
+		}
+	}
+
 	// Follows and dead-override edits rewrite the lock graph, so they trigger
-	// a re-lock below; nixpkgs-master, canonical-input URL, and canonical-form
-	// edits do not (they change flake.nix text only, not what the lock
-	// resolves to — canonical-form relocation moves a follows binding without
-	// changing its target).
+	// a re-lock below; nixpkgs-master, canonical-input URL, canonical-form,
+	// and outputs-signature edits do not (they change flake.nix text only,
+	// not what the lock resolves to — canonical-form relocation moves a
+	// follows binding without changing its target, and widening the outputs
+	// formals changes no input at all).
 	lockAffecting := len(appliedFollows) > 0 || len(removed) > 0
-	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0 || len(canonicalFormApplied) > 0 || canonicalFormMigrated
+	flakeNixChanged := lockAffecting || nixpkgsMasterChanged || canonicalURLsRewritten > 0 || len(canonicalFormApplied) > 0 || canonicalFormMigrated || outputsWidened
 
 	if !flakeNixChanged {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: edits already present in flake.nix; nothing to apply\n")
@@ -838,6 +902,11 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	if sel.Has(lint.CheckCanonicalForm) && after.CanonicalForm != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: canonical-form issues remain after fix (scattered: %v, legacy sentinel: %v); re-run lint for detail\n",
 			after.CanonicalForm.Scattered, after.CanonicalForm.LegacySentinel)
+		return 1
+	}
+	if sel.Has(lint.CheckOutputsParticipation) && after.OutputsParticipation != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: outputs signature still rejects declared input(s) %v after fix; re-run lint for detail\n",
+			after.OutputsParticipation.Missing)
 		return 1
 	}
 	return 0
