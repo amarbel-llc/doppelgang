@@ -44,6 +44,13 @@ func scanFormals(text string) formalsScan {
 		case c == '}' || c == ']' || c == ')':
 			depth--
 			i++
+			// Record the close of a NESTED group, so a formal whose default
+			// value ends in one (`pkgs ? import nixpkgs { }`, `systems ? [ … ]`)
+			// leaves the insertion point after the whole default rather than
+			// stranded inside it. The post-decrement depth is passed so the
+			// formals' OWN closing brace (depth 1 → 0) is not recorded — that
+			// would put the insertion after the set instead of within it.
+			sc.noteToken(i, c, depth)
 		case c == '"':
 			i = skipDoubleQuoted(text, i)
 			sc.noteToken(i, '"', depth)
@@ -186,3 +193,22 @@ func isIdentByte(c byte) bool {
 
 // isBlank reports whether s is empty or only whitespace.
 func isBlank(s string) bool { return strings.TrimSpace(s) == "" }
+
+// isIdentifierAtPrefix reports whether s is exactly an identifier followed by
+// `@` — the head of the name-first @-binding form `args@{ … }: …`, whose
+// formals still bind and still constrain the call.
+func isIdentifierAtPrefix(s string) bool {
+	if len(s) < 2 || s[len(s)-1] != '@' {
+		return false
+	}
+	name := strings.TrimSpace(s[:len(s)-1])
+	if name == "" || !isIdentStart(name[0]) {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if !isIdentByte(name[i]) {
+			return false
+		}
+	}
+	return true
+}

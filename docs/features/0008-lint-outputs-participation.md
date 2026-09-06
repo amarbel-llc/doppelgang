@@ -224,6 +224,30 @@ insertion point is recorded during a forward pass rather than recovered by
 walking back from the closing brace — a trailing comment inside the formals
 would otherwise swallow the insertion.
 
+Two shapes cost a corrupting bug each during review, both caught before this
+landed and both now regression-tested:
+
+- The scan must record the CLOSE of a nested group, not just its open.
+  Without that, a formal whose default ends in one — `pkgs ? import nixpkgs
+  { }`, `systems ? [ "x86_64-linux" ]`, `x ? (foo bar)` — left the insertion
+  point stranded inside the default, and the repair emitted invalid Nix
+  (`{ pkgs ? import nixpkgs, ... { } }`). The formals' own closing brace must
+  still NOT be recorded, so the post-decrement depth decides.
+- `outputs = args@{ self, nixpkgs }: …`, the name-first spelling of an
+  `@`-binding, tokenizes as `OuterText("args@")` then the group. Returning
+  "simple argument" on that first non-blank item read it as a catch-all, but
+  Nix still enforces the formals — `nix flake show` on that shape fails with
+  the same "unexpected argument" error. The misread would have made both the
+  check and the repair silently do nothing, AND defeated the widening
+  invariant, which re-classifies the edited text through the same code path.
+
+A leading `{ … }` is only treated as formals when followed by the `:` (or
+`@name:`) that makes it a function, so a value that merely BEGINS with an
+attrset — `outputs = { a = 1; } // f;` — is left alone instead of having
+`...` spliced into it. Such a flake is already non-evaluable (an `outputs`
+that is not a function), so this is defence in depth rather than a shape
+expected in the wild.
+
 ## Finding text names its own check
 
 A conformist finding is attributed to the linter stanza name

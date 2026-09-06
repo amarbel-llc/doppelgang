@@ -220,6 +220,85 @@ func TestWidenOutputsFormalsSingleLineForms(t *testing.T) {
 	}
 }
 
+// A default value containing a nested group must not swallow the insertion
+// point: the ellipsis belongs after the whole formal, not inside its default
+// expression. Regression for a scanner that never recorded a closing
+// delimiter, which spliced `, ...` into the middle of the default.
+func TestWidenOutputsFormalsDefaultWithNestedGroup(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "attrset in default",
+			src:  "{\n  outputs = { pkgs ? import nixpkgs { } }: { };\n}\n",
+			want: "{ pkgs ? import nixpkgs { }, ... }:",
+		},
+		{
+			name: "list in default",
+			src:  "{\n  outputs = { systems ? [ \"x86_64-linux\" ] }: { };\n}\n",
+			want: "{ systems ? [ \"x86_64-linux\" ], ... }:",
+		},
+		{
+			name: "parens in default",
+			src:  "{\n  outputs = { x ? (foo bar) }: { };\n}\n",
+			want: "{ x ? (foo bar), ... }:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, changed, err := WidenOutputsFormals([]byte(tc.src))
+			if err != nil {
+				t.Fatalf("WidenOutputsFormals: %v", err)
+			}
+			if !changed {
+				t.Fatal("want changed=true")
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("got:\n%s\nwant it to contain %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// `args@{ … }:` binds the whole attrset AND still enforces the formals, so a
+// name-first @-binding with no `...` is closed, not a simple-arg function.
+// Misreading it as simple-arg hides the violation and defeats the repair.
+func TestOutputsFormalsNameFirstAtBinding(t *testing.T) {
+	src := "{\n  outputs = args@{ self, nixpkgs }: { };\n}\n"
+	shape, names, err := OutputsFormals([]byte(src))
+	if err != nil {
+		t.Fatalf("OutputsFormals: %v", err)
+	}
+	if shape != OutputsClosed {
+		t.Fatalf("shape = %v, want closed", shape)
+	}
+	if strings.Join(names, ",") != "self,nixpkgs" {
+		t.Errorf("names = %v, want [self nixpkgs]", names)
+	}
+	out, changed, err := WidenOutputsFormals([]byte(src))
+	if err != nil {
+		t.Fatalf("WidenOutputsFormals: %v", err)
+	}
+	if !changed {
+		t.Fatal("want changed=true for a closed name-first @-binding")
+	}
+	if !strings.Contains(string(out), "args@{ self, nixpkgs, ... }:") {
+		t.Errorf("got:\n%s", out)
+	}
+}
+
+func TestOutputsFormalsNameFirstAtBindingWithEllipsis(t *testing.T) {
+	shape, _, err := OutputsFormals([]byte("{\n  outputs = args@{ self, ... }: { };\n}\n"))
+	if err != nil {
+		t.Fatalf("OutputsFormals: %v", err)
+	}
+	if shape != OutputsEllipsis {
+		t.Fatalf("shape = %v, want ellipsis", shape)
+	}
+}
+
 // A closed formals set whose last formal carries a comment must not have the
 // ellipsis spliced into the comment text.
 func TestWidenOutputsFormalsTrailingComment(t *testing.T) {

@@ -203,7 +203,16 @@ func classifyOutputsValue(tree langlang.Tree, val langlang.NodeID) *outputsForma
 		case "Comment":
 			continue
 		case "OuterText":
-			if isBlank(tree.Text(item)) {
+			text := strings.TrimSpace(tree.Text(item))
+			if text == "" {
+				continue
+			}
+			// `outputs = args@{ self, nixpkgs }: …` — the name-first spelling
+			// of an @-binding. Nix still enforces the formals that follow, so
+			// this is NOT a catch-all argument: keep scanning for the group.
+			// Reading it as simple-arg would hide a closed signature and make
+			// both the check and the repair silently do nothing.
+			if isIdentifierAtPrefix(text) {
 				continue
 			}
 			// `outputs = inputs: …` — a single identifier binds everything.
