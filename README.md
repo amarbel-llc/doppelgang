@@ -39,8 +39,8 @@ so build-time-only paths like setup hooks (`install-shell-files`,
 `goBuildHook`) are reachable. `--scope runtime` traces output paths only.
 
 `lint` reads `<flake>/flake.lock` (and `<flake>/flake.nix`) and surfaces
-classes of reducible input duplication and rot, plus (opt-in) one convention
-check:
+classes of reducible input duplication and rot, plus (opt-in) four convention
+checks:
 
 - **follows opportunities** — nodes that pin a byte-identical source (same
   `narHash`/`rev`) more than once. For each, `lint` prints the concrete
@@ -67,6 +67,23 @@ check:
   `--checks nixpkgs-master` (or the `all` alias). Detection reads `flake.nix`
   alone — no `flake.lock` needed — so it works on a freshly-cloned repo that
   is not yet locked. See `docs/features/0005-lint-nixpkgs-master-convention.md`.
+- **canonical-inputs** (opt-in; not a default check) — verifies each top-level
+  input whose name matches a repo published by the PAPI domain uses that
+  repo's canonical forge URL, discovered from `papi repos <domain>` rather
+  than any hardcoded table. The check governs *which forge* an input is
+  fetched from, not *which revision*, so an input already in the canonical
+  form that differs from it only by pinning a 40-hex revision is conformant:
+  it is reported with status `pinned`, does not fail the check, and `--fix`
+  leaves it alone. The pin is read the way that form takes one — the tarball
+  form as `…/<repo>/archive/<rev>.tar.gz`, the git+https form as `?rev=<rev>`,
+  the `github:` form as a third path segment. An input in some *other* form is
+  still a finding (the fetcher type is part of what makes two repos' inputs
+  collapse onto one lock node), and when it pins a revision the repair carries
+  that revision into the canonical form rather than floating the input to the
+  canonical ref. `--fix` rewrites non-canonical URLs
+  byte-preservingly and does not re-lock. Requires `--papi-domain` (or
+  `PAPI_DOMAIN`); without it the check degrades to a no-op, as it does when
+  `papi` is unreachable. See `docs/features/0006-lint-canonical-inputs.md`.
 - **canonical-form** (opt-in; not a default check; per-flake opt-in) — flags
   inputs whose bindings (`url`, `follows`/overrides, nested sub-attrset) are
   not contiguous under the top-level `inputs` attrset — i.e. some other

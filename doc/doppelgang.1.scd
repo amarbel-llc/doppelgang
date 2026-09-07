@@ -166,9 +166,23 @@ _--checks all_.
 
 *canonical-inputs*
 	Verifies each top-level input whose name matches a repo published by
-	the PAPI domain uses that repo's canonical forge URL. *--fix* rewrites
-	non-canonical URLs byte-preservingly and does not re-lock. Requires
-	*--papi-domain*.
+	the PAPI domain uses that repo's canonical forge URL. The check
+	governs which forge an input is fetched from, not which revision, so
+	an input already in the canonical form, differing from it only by
+	pinning a 40-hex revision, is conformant: it is reported with status
+	_pinned_, and neither fails the check nor is touched by *--fix*. The
+	pin is written the way that form takes one - the tarball form as
+	_.../<repo>/archive/<rev>.tar.gz_, the git+https form as
+	_?rev=<rev>_, the github: form as a third path segment.
+
+	An input in some other form is still a finding, even on the canonical
+	host, because the fetcher type is part of what makes two repos'
+	inputs collapse onto one lock node. When such a URL pins a revision
+	the repair carries that revision into the canonical form rather than
+	floating the input to the canonical ref. A branch or tag in the ref
+	position is a float, not a pin, so it is rewritten as usual. *--fix*
+	rewrites non-canonical URLs byte-preservingly and does not re-lock.
+	Requires *--papi-domain*.
 
 *canonical-form*
 	Flags inputs whose bindings are not contiguous under the top-level

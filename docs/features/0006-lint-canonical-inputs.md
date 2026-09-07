@@ -110,7 +110,7 @@ follows-resolved alias):
 1. Look up the input name in the PAPI repo map.
 2. If found, read the input's current `.url` binding from flake.nix via
    nixedit (the same byte-preserving shallow PEG as every other check).
-3. If the current URL differs from the PAPI canonical URL, report a finding.
+3. Classify the current URL against the PAPI canonical URL.
 
 Inputs whose URL binding is not a plain quoted string (interpolation, `let…in`,
 etc.) are skipped — the safe conservative outcome, matching nixedit's existing
@@ -118,11 +118,71 @@ behaviour for unparseable values. Inputs not present in the PAPI map (e.g.
 nixpkgs, flake-utils, or any repo outside the operator's domain) are skipped
 unconditionally.
 
+#### Revision pins are orthogonal to the forge (issue #36)
+
+This check answers *which forge an input is fetched from*, not *which revision*.
+Treating the canonical URL as a byte-string to match therefore mis-classified a
+deliberate pin: an input at
+`https://code.linenisgreat.com/igloo/archive/<rev>.tar.gz` is already on the
+canonical forge, but a string comparison against the `master.tar.gz` canonical
+URL reported it non-canonical and `--fix` re-floated it to `master`, silently
+discarding the pin.
+
+Classification is therefore three-way:
+
+- **Exactly canonical** — neither a finding nor a pin.
+- **The canonical form, pinned to a 40-hex revision** — conformant, reported as
+  a *pin*. A pin is informational: it appears in the text, JSON, and NDJSON
+  reports with status `pinned`, but does not fail the check and is never
+  rewritten.
+- **Anything else** — a finding, actionable as before.
+
+The pin is recognised in whichever way the canonical form takes one: the
+tarball form as `…/<repo>/archive/<rev>.tar.gz`, the git+https form as
+`?rev=<rev>`, the github: shorthand as a third path segment. These are
+symmetric — every shape a revision can be *read* out of must also be one it can
+be *written* into, or an input pinned in an unwritable shape would be classed
+non-canonical and repaired to the floating URL, reintroducing the bug in a
+different shape.
+
+Conformance is against the canonical *form*, not merely the canonical host: a
+`git+https://code.linenisgreat.com/<repo>.git?rev=<rev>` input is a finding when
+PAPI publishes the tarball `flake_url`, even though the forge, repo, and
+revision all already match. The fetcher type is part of what this check exists
+to unify — `git` and `tarball` lock nodes for one source do not collapse, which
+is the mixed-forge dedup violation in the problem statement. The repair changes
+the form and keeps the revision.
+
+A 40-hex revision is the only shape counted as a pin. A branch or tag name in
+the same position is a float, not a deliberate revision, so it stays actionable
+and is rewritten to the canonical ref.
+
+### Report shape
+
+`Report.CanonicalInputs` holds only actionable findings; pins go in a separate
+`Report.CanonicalInputPins`. Tagging pins with a status *inside* the findings
+list was the first cut, and it pushed the "a pin must not fail the check"
+invariant out into every consumer — each exit-code and render site had to
+remember to filter. Two fields make the invariant structural, and preserve the
+package convention that a finding always means actionable (see
+`nixpkgsmaster.go`: "there is no conformant value"). The machine-readable
+formats merge the two back into one input-ordered list, tagged with `status`,
+because a reader wants one row per input.
+
 ### Repair
 
 `--fix` rewrites each non-canonical input URL in place via
 `nixedit.SetInputURL`, preserving all surrounding whitespace and structure
-byte-for-byte. The repair edits `flake.nix` only and does **not** re-lock.
+byte-for-byte. `pinned` entries are excluded from the rewrite set, so a
+canonical-host pin survives `--fix` byte-identical.
+
+When a *non-canonical* URL pins a revision, the repair carries that revision
+into the canonical shape rather than floating the input to the canonical ref —
+`github:<owner>/igloo/<rev>` becomes
+`https://code.linenisgreat.com/igloo/archive/<rev>.tar.gz` (or
+`git+https://code.linenisgreat.com/igloo.git?rev=<rev>` when the PAPI entry
+resolves to the git+https form). A forge migration must never also be a
+silent revision bump. The repair edits `flake.nix` only and does **not** re-lock.
 Re-locking is the caller's responsibility (the cascade's `nix flake update`
 runs immediately after the repair lane, materializing the new forge URL into
 `flake.lock`). `flake.nix` is staged with `git add` after the edit, same as

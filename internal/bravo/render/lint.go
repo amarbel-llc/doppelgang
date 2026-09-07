@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 
 	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
@@ -112,13 +113,21 @@ func LintText(w io.Writer, s LintSummary) error {
 		if _, err := fmt.Fprintf(w, "\n── canonical inputs ──\n"); err != nil {
 			return err
 		}
-		if len(s.Report.CanonicalInputs) == 0 {
+		// The empty-state line claims there is nothing to report, so it is
+		// gated on the pins too — otherwise it would print immediately above
+		// a listed pin and contradict it.
+		if len(s.Report.CanonicalInputs) == 0 && len(s.Report.CanonicalInputPins) == 0 {
 			if _, err := fmt.Fprintln(w, "(all inputs point at their PAPI-canonical URLs, or papi domain not set)"); err != nil {
 				return err
 			}
 		}
 		for _, f := range s.Report.CanonicalInputs {
 			if _, err := fmt.Fprintf(w, "%s: %q → %q\n", f.Input, f.CurrentURL, f.CanonicalURL); err != nil {
+				return err
+			}
+		}
+		for _, p := range s.Report.CanonicalInputPins {
+			if _, err := fmt.Fprintf(w, "%s: pinned to %s on the canonical host (conformant)\n", p.Input, p.Rev); err != nil {
 				return err
 			}
 		}
@@ -253,11 +262,6 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		URL       string `json:"url,omitempty"`
 		TargetURL string `json:"targetURL,omitempty"`
 	}
-	type jsonCanonicalInput struct {
-		Input        string `json:"input"`
-		CurrentURL   string `json:"currentURL"`
-		CanonicalURL string `json:"canonicalURL"`
-	}
 	type jsonCanonicalForm struct {
 		// Canonical is true when every input's bindings are contiguous and
 		// the flake already uses the structured directive (or has not
@@ -276,7 +280,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		MultiVersion    *[]jsonMulti          `json:"multiVersionInputs,omitempty"`
 		DeadOverrides   *[]deadOverrideDiag   `json:"deadOverrides,omitempty"`
 		NixpkgsMaster   *jsonNixpkgsMaster    `json:"nixpkgsMaster,omitempty"`
-		CanonicalInputs *[]jsonCanonicalInput `json:"canonicalInputs,omitempty"`
+		CanonicalInputs *[]canonicalInputDiag `json:"canonicalInputs,omitempty"`
 		CanonicalForm   *jsonCanonicalForm    `json:"canonicalForm,omitempty"`
 	}{}
 	if s.active(lint.CheckFollows) {
@@ -316,14 +320,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		out.NixpkgsMaster = nm
 	}
 	if s.active(lint.CheckCanonicalInputs) {
-		ci := make([]jsonCanonicalInput, 0, len(s.Report.CanonicalInputs))
-		for _, f := range s.Report.CanonicalInputs {
-			ci = append(ci, jsonCanonicalInput{
-				Input:        f.Input,
-				CurrentURL:   f.CurrentURL,
-				CanonicalURL: f.CanonicalURL,
-			})
-		}
+		ci := canonicalInputDiags(s.Report)
 		out.CanonicalInputs = &ci
 	}
 	if s.active(lint.CheckCanonicalForm) {
@@ -426,10 +423,48 @@ type ndjsonNixpkgsMasterDiag struct {
 	TargetURL string `json:"targetURL,omitempty"`
 }
 
-type ndjsonCanonicalInputDiag struct {
+// canonicalInputStatus* are the wire tokens for a canonical-inputs row.
+// lint.Report keeps actionable findings and conformant pins in separate
+// fields; the machine-readable formats merge them into one list per input and
+// use this to tell them apart.
+const (
+	canonicalInputStatusNonCanonical = "non-canonical"
+	canonicalInputStatusPinned       = "pinned"
+)
+
+// canonicalInputDiag is one canonical-inputs row, serving as both the JSON
+// array element and the NDJSON diagnostic — the same double duty
+// deadOverrideDiag performs, so the two formats cannot drift apart.
+type canonicalInputDiag struct {
 	Input        string `json:"input"`
 	CurrentURL   string `json:"currentURL"`
 	CanonicalURL string `json:"canonicalURL"`
+	Status       string `json:"status"`
+}
+
+// canonicalInputDiags merges a report's actionable canonical-input findings
+// with its conformant revision pins into a single list ordered by input name.
+// A pin has nothing to rewrite, so its CanonicalURL is its current URL.
+func canonicalInputDiags(r lint.Report) []canonicalInputDiag {
+	out := make([]canonicalInputDiag, 0, len(r.CanonicalInputs)+len(r.CanonicalInputPins))
+	for _, f := range r.CanonicalInputs {
+		out = append(out, canonicalInputDiag{
+			Input:        f.Input,
+			CurrentURL:   f.CurrentURL,
+			CanonicalURL: f.CanonicalURL,
+			Status:       canonicalInputStatusNonCanonical,
+		})
+	}
+	for _, p := range r.CanonicalInputPins {
+		out = append(out, canonicalInputDiag{
+			Input:        p.Input,
+			CurrentURL:   p.URL,
+			CanonicalURL: p.URL,
+			Status:       canonicalInputStatusPinned,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Input < out[j].Input })
+	return out
 }
 
 type ndjsonCanonicalFormDiag struct {
@@ -526,13 +561,21 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 		Description: "canonical inputs",
 		OK:          len(s.Report.CanonicalInputs) == 0,
 	}
-	for i, f := range s.Report.CanonicalInputs {
+	// A pin rides along as a passing subtest carrying its diagnostic: the
+	// report names it without asserting a failure, since a revision pin on the
+	// canonical host is conformant (#36).
+	for i, d := range canonicalInputDiags(s.Report) {
+		pinned := d.Status == canonicalInputStatusPinned
+		format := "%s: non-canonical URL %q"
+		if pinned {
+			format = "%s: canonical URL pinned to a revision %q"
+		}
 		canonicalInputs.Subtest = append(canonicalInputs.Subtest, ndjsonTest{
 			Type:        "test",
 			N:           i + 1,
-			Description: fmt.Sprintf("%s: non-canonical URL %q", f.Input, f.CurrentURL),
-			OK:          false,
-			Diagnostic:  ndjsonCanonicalInputDiag{Input: f.Input, CurrentURL: f.CurrentURL, CanonicalURL: f.CanonicalURL},
+			Description: fmt.Sprintf(format, d.Input, d.CurrentURL),
+			OK:          pinned,
+			Diagnostic:  d,
 		})
 	}
 

@@ -307,7 +307,7 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 		report.NixpkgsMaster = nixpkgsMasterFinding(flakeDir, nixpkgsMasterSHA)
 	}
 	if sel.Has(lint.CheckCanonicalInputs) {
-		report.CanonicalInputs = canonicalInputFindings(ctx, flakeDir, lock, papiDomain)
+		report.CanonicalInputs, report.CanonicalInputPins = canonicalInputFindings(ctx, flakeDir, lock, papiDomain)
 	}
 	if sel.Has(lint.CheckCanonicalForm) {
 		report.CanonicalForm = canonicalFormFinding(flakeDir)
@@ -356,17 +356,18 @@ func canonicalFormFinding(flakeDir string) *lint.CanonicalFormFinding {
 }
 
 // canonicalInputFindings queries the PAPI domain for the canonical repo-URL
-// map and checks each root-level lock input against it. Returns nil when
-// papiDomain is empty, flake.nix is absent/empty, or the papi call fails
-// (offline degrade). flake.nix is read before the network call so a missing
-// file skips the papi round-trip entirely (fixes #20).
-func canonicalInputFindings(ctx context.Context, flakeDir string, lock *flakelock.Lock, papiDomain string) []lint.CanonicalInputFinding {
+// map and checks each root-level lock input against it, returning the
+// actionable findings and, separately, the conformant revision pins. Both are
+// nil when papiDomain is empty, flake.nix is absent/empty, or the papi call
+// fails (offline degrade). flake.nix is read before the network call so a
+// missing file skips the papi round-trip entirely (fixes #20).
+func canonicalInputFindings(ctx context.Context, flakeDir string, lock *flakelock.Lock, papiDomain string) ([]lint.CanonicalInputFinding, []lint.CanonicalInputPin) {
 	if papiDomain == "" {
-		return nil
+		return nil, nil
 	}
 	src, _ := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
 	if len(src) == 0 {
-		return nil
+		return nil, nil
 	}
 	repoURLs := papiRepoURLs(ctx, papiDomain)
 	return lint.CanonicalInputs(lock, src, repoURLs)
@@ -903,7 +904,8 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	}
 	// canonical-inputs: the re-analyze pass runs with empty papiDomain (no
 	// network call), so after.CanonicalInputs is always nil. Instead verify
-	// that every finding in the pre-fix report was actually rewritten.
+	// that every finding in the pre-fix report was actually rewritten. Pins
+	// never enter report.CanonicalInputs, so they cannot be miscounted here.
 	if sel.Has(lint.CheckCanonicalInputs) && canonicalURLsRewritten < len(report.CanonicalInputs) {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: %d canonical-input URL(s) not rewritten (already correct or unparseable); re-run lint for detail\n",
 			len(report.CanonicalInputs)-canonicalURLsRewritten)

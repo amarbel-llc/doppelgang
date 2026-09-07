@@ -33,6 +33,11 @@ type Report struct {
 	// flake.lock (for root-input enumeration) and flake.nix (for URL reading),
 	// plus a live papi call; Analyze leaves it nil. See CheckCanonicalInputs.
 	CanonicalInputs []CanonicalInputFinding
+	// CanonicalInputPins lists top-level inputs that already resolve to their
+	// canonical URL but pin a revision. They are conformant (#36) and held
+	// apart from CanonicalInputs so no consumer can fail the check, or rewrite
+	// a URL, on a deliberate pin. Populated by the same pass.
+	CanonicalInputPins []CanonicalInputPin
 	// CanonicalForm is non-nil when the flake has opted into canonical-form
 	// enforcement (a `# doppelgang: canonical` directive, or the deprecated
 	// `# canonical-form` sentinel, above its `inputs` binding) and either has

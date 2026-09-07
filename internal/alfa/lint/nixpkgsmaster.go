@@ -71,9 +71,11 @@ var (
 	// convention pins nixpkgs-master to a full 40-char lowercase-hex
 	// revision of NixOS/nixpkgs.
 	nixpkgsMasterPinnedRE = regexp.MustCompile(`^github:NixOS/nixpkgs/[0-9a-f]{40}$`)
-	// nixpkgsSHARE validates a bare 40-char lowercase-hex git revision, the
-	// shape the --nixpkgs-master-sha repair parameter must take.
-	nixpkgsSHARE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	// sha40RE validates a bare 40-char lowercase-hex git revision: the shape
+	// the --nixpkgs-master-sha repair parameter must take, and the only shape
+	// canonical-inputs counts as a deliberate revision pin. Shared by both
+	// checks so they cannot disagree about what a revision is.
+	sha40RE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 // ClassifyNixpkgsMaster classifies the url of a flake's top-level
@@ -123,7 +125,7 @@ func ClassifyNixpkgsMaster(url string, present bool, targetSHA string) *NixpkgsM
 
 // ValidNixpkgsSHA reports whether s is a 40-char lowercase-hex git revision,
 // the required shape of the repair's target sha.
-func ValidNixpkgsSHA(s string) bool { return nixpkgsSHARE.MatchString(s) }
+func ValidNixpkgsSHA(s string) bool { return sha40RE.MatchString(s) }
 
 // NixpkgsMasterURL builds the conventional pinned url for a revision, e.g.
 // "github:NixOS/nixpkgs/<sha>". It is the value the repair writes.
