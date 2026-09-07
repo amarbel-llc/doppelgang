@@ -171,6 +171,15 @@ CI as a gate against new input duplication and rot (over the chosen subset).
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.
 
+## Documentation
+
+The full reference is `doppelgang(1)`, written as scdoc in `doc/` and compiled
+by Nix (`packages.doppelgang-doc`, joined into the default package). After a
+`just build` it lands at `result/share/man/man1/`; `just explore-man` renders
+it. It is also on the devshell's `MANPATH`, so `man doppelgang` works in-tree.
+
+Design records for individual `lint` checks live in `docs/features/`.
+
 ## Runtime requirements
 
 `doppelgang` shells out to `nix-store`, `nix path-info`, and `nix why-depends`,

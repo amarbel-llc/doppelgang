@@ -79,10 +79,11 @@
             && !(pkgs.lib.hasSuffix "/README.md" path)
             && !(pkgs.lib.hasSuffix "/LICENSE" path)
             && !(pkgs.lib.hasInfix "/build/" path)
+            && !(pkgs.lib.hasInfix "/doc/" path)
             && !(pkgs.lib.hasInfix "/.tmp/" path);
         };
 
-        doppelgang = pkgs.buildGoApplication {
+        doppelgangBin = pkgs.buildGoApplication {
           pname = "doppelgang";
           version = doppelgangVersion;
           commit = doppelgangCommit;
@@ -94,6 +95,39 @@
           CGO_ENABLED = "0";
         };
 
+        # Man pages, compiled from the scdoc sources in ./doc. Kept a separate
+        # derivation from the Go build (rather than a postInstall on it) so
+        # editing a man page does not bust the Go derivation's hash — the same
+        # reason goSrc filters ./doc out. Per eng-manpages(7), man pages are
+        # built by Nix, never by a justfile recipe or CI.
+        doppelgangDoc = pkgs.stdenvNoCC.mkDerivation {
+          pname = "doppelgang-doc";
+          version = doppelgangVersion;
+          src = ./doc;
+          nativeBuildInputs = [ pkgs.scdoc ];
+          dontUnpack = true;
+          dontBuild = true;
+          installPhase = ''
+            mkdir -p $out/share/man/man1
+            for f in $src/*.1.scd; do
+              [ -e "$f" ] || continue
+              scdoc < "$f" > "$out/share/man/man1/$(basename "$f" .scd)"
+            done
+          '';
+        };
+
+        # What `nix build` and `nix run` resolve to: the binary plus its man
+        # pages under one prefix, so `result/share/man` sits alongside
+        # `result/bin`.
+        doppelgang = pkgs.symlinkJoin {
+          name = "doppelgang-${doppelgangVersion}";
+          paths = [
+            doppelgangBin
+            doppelgangDoc
+          ];
+          meta.mainProgram = "doppelgang";
+        };
+
         goEnv = pkgs.mkGoEnv {
           pwd = ./.;
           inherit go;
@@ -101,7 +135,8 @@
 
         # `go test ./...` exposed as a flake check so `nix flake check`
         # (and `just test-go`) run the suite in a sandboxed nix build.
-        doppelgangGoTest = doppelgang.overrideAttrs (_old: {
+        # Overrides the raw Go derivation, not the symlinkJoin.
+        doppelgangGoTest = doppelgangBin.overrideAttrs (_old: {
           pname = "doppelgang-go-test";
           subPackages = null;
           doCheck = true;
@@ -113,6 +148,9 @@
         packages = {
           inherit doppelgang;
           default = doppelgang;
+          # The man pages alone, for consumers that want the docs without the
+          # binary's closure.
+          doppelgang-doc = doppelgangDoc;
           conformist-impure-config = conformistImpureEval.config.build.configFile;
           # The raw conformist binary, so `just lint-worktree` can
           # `nix run .#conformist -- check ...` instead of resolving
@@ -131,6 +169,9 @@
 
         devShells.default = pkgs-master.mkShell {
           packages = [
+            # Puts doppelgang(1) on the devShell's MANPATH, so `man doppelgang`
+            # works in-tree without a `nix build` first.
+            doppelgangDoc
             conformistPkg
             conformistEval.config.build.preCommit
             conformistEval.config.build.repair

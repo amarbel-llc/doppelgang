@@ -180,6 +180,17 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 explore-lint-nixpkgs-master DIR SHA: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks nixpkgs-master --fix --nixpkgs-master-sha {{SHA}} --format text; echo "exit=$?"
 
+# Render a man page for inspection after editing its scdoc source in doc/.
+# The pages themselves are built by nix, never by a recipe (eng-manpages(7)):
+# the default package is a symlinkJoin of the binary and the compiled pages,
+# so `build-nix` already put them under result/share/man. This only opens
+# what nix produced. PAGE is the page name without the .gz suffix.
+#
+# view a man page built by nix
+[group('explore')]
+explore-man PAGE="doppelgang.1": build-nix
+  man -l "result/share/man/man1/{{PAGE}}.gz"
+
 # Tag a doppelgang release. The "v" prefix is added for you, so pass the
 # semver without it. Usage: just tag 0.1.0 "feat: initial release"
 #
