@@ -116,11 +116,16 @@ clean-build:
 # rejected with `function 'outputs' called with unexpected argument '<name>'`
 # evaluates after the repair.
 # Usage: just explore-lint-outputs-participation /path/to/flake --fix
+# (from a shell a leading flag needs a `--` separator: ... /path/to/flake -- --fix)
+#
+# trim_start_match drops a leading `--` that reached ARGS as a literal, which
+# Go's flag package would otherwise stop at -- silently dropping every flag
+# after it while still exiting 0. See explore-lint-checks for the full note.
 #
 # run the outputs-participation check against a flake directory
 [group('explore')]
 explore-lint-outputs-participation DIR *ARGS: build-nix
-  ./result/bin/doppelgang lint --flake {{ DIR }} --checks outputs-participation --format text {{ ARGS }}; echo "exit=$?"
+  ./result/bin/doppelgang lint --flake {{ DIR }} --checks outputs-participation --format text {{ trim_start_match(ARGS, "-- ") }}; echo "exit=$?"
 
 # Run `doppelgang lint --flake <DIR>` against an arbitrary flake
 # directory. Used for ad-hoc validation of lint output against external
@@ -158,10 +163,18 @@ explore-lint-fix DIR: build-nix
 # CHECKS is the comma-separated subset; pass extra args after `--`, e.g.
 # `just explore-lint-checks /tmp/flake follows,dead-overrides -- --format ndjson`.
 #
+# The `--` stops just from claiming `--format` as its own option, and just's
+# parser then consumes that separator. But a caller that already supplies one
+# (the MCP just runner) delivers a literal `--` as the first arg instead --
+# and Go's flag package STOPS at `--`, silently dropping every flag after it
+# while still exiting 0. That reads as a clean pass, so the false result is
+# worse than an error. trim_start_match drops a leading separator so both
+# invocation paths behave identically.
+#
 # run `doppelgang lint --checks` against a flake directory and report the exit code
 [group('explore')]
 explore-lint-checks DIR CHECKS *ARGS: build-nix
-  ./result/bin/doppelgang lint --flake {{DIR}} --checks {{CHECKS}} {{ARGS}}; echo "exit=$?"
+  ./result/bin/doppelgang lint --flake {{DIR}} --checks {{CHECKS}} {{ trim_start_match(ARGS, "-- ") }}; echo "exit=$?"
 
 # Run the nixpkgs-master convention repair against a flake directory — the
 # exact shape eng's update-nix cascade invokes (issue #16). Pins the
@@ -171,9 +184,8 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 # code. SHA must be a 40-hex nixpkgs revision.
 #
 # To see the same staleness detection WITHOUT repairing, pass the sha to the
-# check-mode recipe instead (no `--` separator: just forwards it literally and
-# Go's flag parser stops there, silently dropping every flag after it):
-#   just explore-lint-checks <DIR> nixpkgs-master --nixpkgs-master-sha <SHA>
+# check-mode recipe instead:
+#   just explore-lint-checks <DIR> nixpkgs-master -- --nixpkgs-master-sha <SHA>
 #
 # run the nixpkgs-master convention repair against a flake directory
 [group('explore')]
