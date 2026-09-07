@@ -57,7 +57,11 @@ check:
   `<flake>/flake.nix` declares a top-level `nixpkgs-master` input pinned to
   `github:NixOS/nixpkgs/<40-hex sha>`, the shape eng's update-nix cascade
   requires. It fails on a missing input, a floating ref (no rev, or a
-  branch/tag name), or a non-github shape. `--fix` pins it (see below). This
+  branch/tag name), or a non-github shape. Pass `--nixpkgs-master-sha
+  <40-hex>` to also fail a *stale* pin — one that is well-formed but names a
+  revision other than that target — which is what lets the cascade advance an
+  already-pinned repo; without the flag the check is shape-only and any
+  well-formed pin passes. `--fix` pins it (see below). This
   encodes an amarbel-llc-fleet policy rather than a universal finding, so it
   is excluded from the default checks and only runs when selected via
   `--checks nixpkgs-master` (or the `all` alias). Detection reads `flake.nix`
@@ -126,7 +130,7 @@ When the `nixpkgs-master` check is selected, `--fix` pins the input to
 `--nixpkgs-master-sha <40-hex>` (required in that case; `--fix` without it
 exits `2`): the `nixpkgs-master.url = "github:NixOS/nixpkgs/<sha>";` binding is
 spliced into the `inputs` attrset when the input is missing, or its url is
-rewritten in place when it floats — same byte-preserving PEG surgery as the
+rewritten in place when it floats or is stale — same byte-preserving PEG surgery as the
 follows/dead-override edits. Unlike those, the nixpkgs-master pin edits
 `flake.nix` only and does **not** re-lock: materializing the new/updated input
 into `flake.lock` is left to the caller (eng's cascade runs `nix flake update`

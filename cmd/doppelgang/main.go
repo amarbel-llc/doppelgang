@@ -81,9 +81,11 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "output, and --fix alike.\n")
 	fmt.Fprintf(os.Stderr, "The nixpkgs-master check (opt-in) verifies flake.nix declares a nixpkgs-master\n")
 	fmt.Fprintf(os.Stderr, "input pinned to github:NixOS/nixpkgs/<40-hex>, failing on a missing input, a\n")
-	fmt.Fprintf(os.Stderr, "floating ref, or a non-github shape. --fix pins it to --nixpkgs-master-sha (which\n")
-	fmt.Fprintf(os.Stderr, "is required with --fix when the check is selected): the url is spliced in when the\n")
-	fmt.Fprintf(os.Stderr, "input is missing, or rewritten when it floats. This repair edits flake.nix only\n")
+	fmt.Fprintf(os.Stderr, "floating ref, or a non-github shape. Supplying --nixpkgs-master-sha also fails a\n")
+	fmt.Fprintf(os.Stderr, "stale pin — well-formed but a different revision than that target; without it the\n")
+	fmt.Fprintf(os.Stderr, "check is shape-only. --fix pins it to --nixpkgs-master-sha (which is required with\n")
+	fmt.Fprintf(os.Stderr, "--fix when the check is selected): the url is spliced in when the input is\n")
+	fmt.Fprintf(os.Stderr, "missing, or rewritten when it floats or is stale. This repair edits flake.nix only\n")
 	fmt.Fprintf(os.Stderr, "and does NOT re-lock — materializing the input into flake.lock is left to the\n")
 	fmt.Fprintf(os.Stderr, "caller (e.g. a following `nix flake update`).\n")
 	fmt.Fprintf(os.Stderr, "--format=auto (the default) emits text on a TTY and tap NDJSON otherwise.\n")
@@ -176,18 +178,21 @@ func lintMain(ctx context.Context, args []string) int {
 	}
 
 	// Repairing the nixpkgs-master convention needs a target revision. Fail
-	// loudly and early when --fix selects the check without a valid sha,
-	// rather than analyzing first and discovering mid-repair we cannot fix
-	// it. Check mode (no --fix) never needs the sha.
-	if *fix && sel.Has(lint.CheckNixpkgsMaster) {
-		if *nixpkgsMasterSHA == "" {
-			fmt.Fprintf(os.Stderr, "doppelgang lint: --fix with the nixpkgs-master check requires --nixpkgs-master-sha <40-hex sha>\n")
-			return 2
-		}
-		if !lint.ValidNixpkgsSHA(*nixpkgsMasterSHA) {
-			fmt.Fprintf(os.Stderr, "doppelgang lint: --nixpkgs-master-sha must be a 40-char lowercase-hex nixpkgs revision, got %q\n", *nixpkgsMasterSHA)
-			return 2
-		}
+	// loudly and early when --fix selects the check without a sha, rather
+	// than analyzing first and discovering mid-repair we cannot fix it.
+	// Check mode does not *require* the sha (an omitted target means the
+	// shape-only check: any well-formed pin conforms).
+	if *fix && sel.Has(lint.CheckNixpkgsMaster) && *nixpkgsMasterSHA == "" {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: --fix with the nixpkgs-master check requires --nixpkgs-master-sha <40-hex sha>\n")
+		return 2
+	}
+	// A supplied sha is load-bearing in check mode too — it is the target a
+	// pin is compared against for staleness — so validate it whenever it is
+	// present, not only under --fix. Silently comparing every repo against a
+	// malformed target would report the whole fleet stale.
+	if *nixpkgsMasterSHA != "" && !lint.ValidNixpkgsSHA(*nixpkgsMasterSHA) {
+		fmt.Fprintf(os.Stderr, "doppelgang lint: --nixpkgs-master-sha must be a 40-char lowercase-hex nixpkgs revision, got %q\n", *nixpkgsMasterSHA)
+		return 2
 	}
 
 	// Resolve the PAPI domain for the canonical-inputs check: --papi-domain
@@ -211,7 +216,7 @@ func lintMain(ctx context.Context, args []string) int {
 	// (which is already impure). Plain `lint` stays offline. The selection
 	// also gates which checks are analyzed, rendered, and counted toward the
 	// exit code.
-	report, err := analyzeFlake(ctx, *flakeDir, sel, *fix || *online, resolvedPAPIDomain)
+	report, err := analyzeFlake(ctx, *flakeDir, sel, *fix || *online, resolvedPAPIDomain, *nixpkgsMasterSHA)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: %v\n", err)
 		return 1
@@ -266,7 +271,10 @@ func lintMain(ctx context.Context, args []string) int {
 // calls `papi repos <domain>` to discover canonical URLs and compares each
 // root-level input. A papi failure degrades to zero findings (offline
 // degrade), not a hard error.
-func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool, papiDomain string) (lint.Report, error) {
+//
+// When nixpkgs-master is selected, nixpkgsMasterSHA names the revision the
+// pin must match; empty means "any well-formed pin conforms" (shape-only).
+func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, online bool, papiDomain, nixpkgsMasterSHA string) (lint.Report, error) {
 	var report lint.Report
 	// Load the lock when any lock-dependent check is selected. The
 	// nixpkgs-master check reads flake.nix alone and does not need the lock,
@@ -296,7 +304,7 @@ func analyzeFlake(ctx context.Context, flakeDir string, sel lint.Selection, onli
 		}
 	}
 	if sel.Has(lint.CheckNixpkgsMaster) {
-		report.NixpkgsMaster = nixpkgsMasterFinding(flakeDir)
+		report.NixpkgsMaster = nixpkgsMasterFinding(flakeDir, nixpkgsMasterSHA)
 	}
 	if sel.Has(lint.CheckCanonicalInputs) {
 		report.CanonicalInputs = canonicalInputFindings(ctx, flakeDir, lock, papiDomain)
@@ -437,8 +445,10 @@ func papiRepoURLsFromJSON(domain string, data []byte, w io.Writer) map[string]st
 // convention's concern); an unparseable flake.nix yields nil with a stderr
 // note. A parseable flake.nix that simply lacks the input yields a Missing
 // finding — the issue's "input missing entirely" fail case. Detection is
-// fully offline.
-func nixpkgsMasterFinding(flakeDir string) *lint.NixpkgsMasterFinding {
+// fully offline. When nixpkgsMasterSHA is non-empty, a pin to any other
+// revision is reported Stale so the cascade can advance it; when empty, any
+// well-formed pin is conformant.
+func nixpkgsMasterFinding(flakeDir, nixpkgsMasterSHA string) *lint.NixpkgsMasterFinding {
 	src, err := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
 	if err != nil {
 		return nil
@@ -448,7 +458,7 @@ func nixpkgsMasterFinding(flakeDir string) *lint.NixpkgsMasterFinding {
 		fmt.Fprintf(os.Stderr, "doppelgang lint: flake.nix not parseable; skipping nixpkgs-master convention check (%v)\n", err)
 		return nil
 	}
-	return lint.ClassifyNixpkgsMaster(url, present)
+	return lint.ClassifyNixpkgsMaster(url, present, nixpkgsMasterSHA)
 }
 
 // directDeadOverrides reads <flakeDir>/flake.nix and returns the dead follows
@@ -804,7 +814,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 	// report.CanonicalInputs); we check the length directly instead.
 	// Each remaining-finding check is gated by the selection so a deselected
 	// category never holds the exit non-zero.
-	after, err := analyzeFlake(ctx, flakeDir, sel, false, "")
+	after, err := analyzeFlake(ctx, flakeDir, sel, false, "", nixpkgsMasterSHA)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: re-analyze: %v\n", err)
 		return 1
@@ -859,7 +869,7 @@ func lintFix(ctx context.Context, flakeDir string, report lint.Report, sel lint.
 			return 1
 		}
 		loopChanged = true
-		after, err = analyzeFlake(ctx, flakeDir, sel, false, "")
+		after, err = analyzeFlake(ctx, flakeDir, sel, false, "", nixpkgsMasterSHA)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "doppelgang lint --fix: round %d: re-analyze: %v\n", fixRound, err)
 			return 1

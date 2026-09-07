@@ -166,8 +166,14 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 # Run the nixpkgs-master convention repair against a flake directory — the
 # exact shape eng's update-nix cascade invokes (issue #16). Pins the
 # nixpkgs-master input in <DIR>/flake.nix to <SHA> (splices it when missing,
-# rewrites when floating), editing flake.nix only (no re-lock; the caller
-# re-locks). Reports the exit code. SHA must be a 40-hex nixpkgs revision.
+# rewrites when floating or when pinned to a revision other than SHA),
+# editing flake.nix only (no re-lock; the caller re-locks). Reports the exit
+# code. SHA must be a 40-hex nixpkgs revision.
+#
+# To see the same staleness detection WITHOUT repairing, pass the sha to the
+# check-mode recipe instead (no `--` separator: just forwards it literally and
+# Go's flag parser stops there, silently dropping every flag after it):
+#   just explore-lint-checks <DIR> nixpkgs-master --nixpkgs-master-sha <SHA>
 #
 # run the nixpkgs-master convention repair against a flake directory
 [group('explore')]

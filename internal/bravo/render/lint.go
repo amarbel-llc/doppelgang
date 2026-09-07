@@ -173,6 +173,8 @@ func nixpkgsMasterLine(f lint.NixpkgsMasterFinding) string {
 		return fmt.Sprintf("nixpkgs-master floating: %q is not pinned to a 40-hex revision (want github:NixOS/nixpkgs/<40-hex sha>)", f.URL)
 	case lint.NixpkgsMasterNonGithub:
 		return fmt.Sprintf("nixpkgs-master non-github: %q is not a github:NixOS/nixpkgs/<40-hex sha> ref", f.URL)
+	case lint.NixpkgsMasterStale:
+		return fmt.Sprintf("nixpkgs-master stale: pinned to %q, want %q", f.URL, f.TargetURL)
 	default:
 		return "nixpkgs-master: non-conformant"
 	}
@@ -245,9 +247,11 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		// Conformant is true when the input is pinned to the convention.
 		Conformant bool `json:"conformant"`
 		// Status and URL describe the non-conformance; omitted when
-		// conformant (there is nothing to report).
-		Status string `json:"status,omitempty"`
-		URL    string `json:"url,omitempty"`
+		// conformant (there is nothing to report). TargetURL is the wanted
+		// pin, present only for the stale status.
+		Status    string `json:"status,omitempty"`
+		URL       string `json:"url,omitempty"`
+		TargetURL string `json:"targetURL,omitempty"`
 	}
 	type jsonCanonicalInput struct {
 		Input        string `json:"input"`
@@ -307,6 +311,7 @@ func LintJSON(w io.Writer, s LintSummary) error {
 		if s.Report.NixpkgsMaster != nil {
 			nm.Status = s.Report.NixpkgsMaster.Status.String()
 			nm.URL = s.Report.NixpkgsMaster.URL
+			nm.TargetURL = s.Report.NixpkgsMaster.TargetURL
 		}
 		out.NixpkgsMaster = nm
 	}
@@ -416,8 +421,9 @@ func newDeadOverrideDiag(d lint.DeadOverride) deadOverrideDiag {
 }
 
 type ndjsonNixpkgsMasterDiag struct {
-	Status string `json:"status"`
-	URL    string `json:"url,omitempty"`
+	Status    string `json:"status"`
+	URL       string `json:"url,omitempty"`
+	TargetURL string `json:"targetURL,omitempty"`
 }
 
 type ndjsonCanonicalInputDiag struct {
@@ -511,7 +517,7 @@ func LintNDJSON(w io.Writer, s LintSummary) error {
 			N:           1,
 			Description: fmt.Sprintf("nixpkgs-master %s", f.Status),
 			OK:          false,
-			Diagnostic:  ndjsonNixpkgsMasterDiag{Status: f.Status.String(), URL: f.URL},
+			Diagnostic:  ndjsonNixpkgsMasterDiag{Status: f.Status.String(), URL: f.URL, TargetURL: f.TargetURL},
 		})
 	}
 

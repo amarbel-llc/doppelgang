@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"code.linenisgreat.com/doppelgang/internal/0/nixedit"
 	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
 )
 
@@ -86,7 +87,7 @@ func TestAnalyzeFlakeDetectsDirectDeadOverride(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "")
+	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestAnalyzeFlakeNoFalsePositive(t *testing.T) {
 }
 `, depLock)
 
-	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "")
+	rep, err := analyzeFlake(context.Background(), dir, lint.AllSelection(), false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestAnalyzeFlakeSkipsDeadOverridesWhenDeselected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestAnalyzeFlakeDetectsMissingNixpkgsMaster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestAnalyzeFlakeNixpkgsMasterConformant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake: %v", err)
 	}
@@ -257,6 +258,87 @@ func TestAnalyzeFlakeNixpkgsMasterConformant(t *testing.T) {
 	}
 	if reportHasFindings(rep, sel) {
 		t.Errorf("reportHasFindings = true, want false (conformant)")
+	}
+}
+
+// TestAnalyzeFlakeNixpkgsMasterStale is the cascade regression: a repo whose
+// pin is well-formed but lags the fleet revision must be reported stale and
+// then actually rewritten. Before this, any 40-hex pin classified as
+// conformant, so eng's update-nix cascade no-op'd on every already-pinned
+// repo while reporting success.
+//
+// It exercises the two steps lintFix performs for this check — classify,
+// then SetInputURL — without invoking nix, since the nixpkgs-master repair
+// deliberately does not re-lock (FDR 0005).
+func TestAnalyzeFlakeNixpkgsMasterStale(t *testing.T) {
+	const (
+		oldSHA = "567a49d1913ce81ac6e9582e3553dd90a955875f"
+		newSHA = "f13ff45a67c1f4c1a5e2b4f8e0d3c9a7b6543210"
+	)
+	dir := writeFlake(t, `{
+  inputs = {
+    nixpkgs-master.url = "github:NixOS/nixpkgs/`+oldSHA+`";
+    igloo.url = "github:amarbel-llc/igloo";
+  };
+  outputs = { self, igloo }: { };
+}
+`, depLock)
+
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "", newSHA)
+	if err != nil {
+		t.Fatalf("analyzeFlake: %v", err)
+	}
+	if rep.NixpkgsMaster == nil || rep.NixpkgsMaster.Status != lint.NixpkgsMasterStale {
+		t.Fatalf("want a Stale nixpkgs-master finding, got %+v", rep.NixpkgsMaster)
+	}
+	if !reportHasFindings(rep, sel) {
+		t.Errorf("reportHasFindings = false, want true (stale nixpkgs-master must gate the exit)")
+	}
+
+	// The repair lane: rewrite the pin the way lintFix does.
+	nixPath := filepath.Join(dir, "flake.nix")
+	src, err := os.ReadFile(nixPath)
+	if err != nil {
+		t.Fatalf("read flake.nix: %v", err)
+	}
+	out, changed, err := nixedit.SetInputURL(src, "nixpkgs-master", lint.NixpkgsMasterURL(newSHA))
+	if err != nil {
+		t.Fatalf("SetInputURL: %v", err)
+	}
+	if !changed {
+		t.Fatal("SetInputURL reported no change for a stale pin")
+	}
+	if err := os.WriteFile(nixPath, out, 0o644); err != nil {
+		t.Fatalf("write flake.nix: %v", err)
+	}
+	if bytes.Contains(out, []byte(oldSHA)) {
+		t.Errorf("old sha still present after repair:\n%s", out)
+	}
+	// Byte-preserving surgery: the untouched sibling input survives intact.
+	if !bytes.Contains(out, []byte(`igloo.url = "github:amarbel-llc/igloo";`)) {
+		t.Errorf("repair disturbed a sibling input:\n%s", out)
+	}
+
+	// lintFix's post-fix verification: the repaired flake now conforms.
+	after, err := analyzeFlake(context.Background(), dir, sel, false, "", newSHA)
+	if err != nil {
+		t.Fatalf("re-analyze: %v", err)
+	}
+	if after.NixpkgsMaster != nil {
+		t.Errorf("flake still non-conformant after repair: %+v", after.NixpkgsMaster)
+	}
+
+	// And a repo already at the target is left alone — the cascade must not
+	// churn a repo that is up to date.
+	if _, changed, err := nixedit.SetInputURL(out, "nixpkgs-master", lint.NixpkgsMasterURL(newSHA)); err != nil {
+		t.Fatalf("SetInputURL (idempotent pass): %v", err)
+	} else if changed {
+		t.Error("SetInputURL rewrote a pin already at the target")
 	}
 }
 
@@ -281,7 +363,7 @@ func TestAnalyzeFlakeNixpkgsMasterWithoutLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSelection: %v", err)
 	}
-	rep, err := analyzeFlake(context.Background(), dir, sel, false, "")
+	rep, err := analyzeFlake(context.Background(), dir, sel, false, "", "")
 	if err != nil {
 		t.Fatalf("analyzeFlake must not require a lock for the nixpkgs-master check: %v", err)
 	}

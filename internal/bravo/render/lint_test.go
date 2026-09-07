@@ -468,6 +468,55 @@ func TestLintNixpkgsMasterRendering(t *testing.T) {
 	}
 }
 
+// TestLintNixpkgsMasterStaleRendering covers the stale status, whose
+// diagnostic is the only one carrying two revisions: the operator (and the
+// cascade's log) must be able to see both what is pinned and what is wanted.
+func TestLintNixpkgsMasterStaleRendering(t *testing.T) {
+	sel, err := lint.ParseSelection("nixpkgs-master")
+	if err != nil {
+		t.Fatalf("ParseSelection: %v", err)
+	}
+	const (
+		pinned = "github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f"
+		want   = "github:NixOS/nixpkgs/f13ff45a67c1f4c1a5e2b4f8e0d3c9a7b6543210"
+	)
+	sum := LintSummary{
+		Report: lint.Report{
+			NixpkgsMaster: &lint.NixpkgsMasterFinding{
+				Status:    lint.NixpkgsMasterStale,
+				URL:       pinned,
+				TargetURL: want,
+			},
+		},
+		Selection: sel,
+	}
+
+	var text bytes.Buffer
+	if err := LintText(&text, sum); err != nil {
+		t.Fatalf("LintText: %v", err)
+	}
+	ts := text.String()
+	if !strings.Contains(ts, "stale") || !strings.Contains(ts, pinned) || !strings.Contains(ts, want) {
+		t.Errorf("text must name the stale status and both revisions:\n%s", ts)
+	}
+
+	var js bytes.Buffer
+	if err := LintJSON(&js, sum); err != nil {
+		t.Fatalf("LintJSON: %v", err)
+	}
+	if s := js.String(); !strings.Contains(s, `"status": "stale"`) || !strings.Contains(s, `"targetURL"`) {
+		t.Errorf("JSON must carry the stale status and targetURL:\n%s", s)
+	}
+
+	var nd bytes.Buffer
+	if err := LintNDJSON(&nd, sum); err != nil {
+		t.Fatalf("LintNDJSON: %v", err)
+	}
+	if s := nd.String(); !strings.Contains(s, `"status":"stale"`) || !strings.Contains(s, want) {
+		t.Errorf("NDJSON must carry the stale diagnostic with its target:\n%s", s)
+	}
+}
+
 // TestLintNixpkgsMasterConformantRendering confirms a conformant flake (nil
 // finding) still renders a positive text line and an ok NDJSON check when the
 // check is selected — so "checked, clean" is distinguishable from "not

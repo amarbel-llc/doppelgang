@@ -7,7 +7,10 @@ promotion-criteria: |
   `doppelgang lint --fix --checks nixpkgs-master --nixpkgs-master-sha $SHA`
   invocation and a full cascade run self-onboards at least one
   previously-halting repo (the input ADDED in the same bump commit) without
-  regressing a conforming repo's pin cascade; (2) the check + repair is
+  regressing a conforming repo's pin cascade, AND advances an
+  already-pinned repo from an older revision to the target (the `stale`
+  case — the cascade no-op'd on these before it existed); (2) the check +
+  repair is
   validated against the real fleet shapes — the flat-in-block form (most
   repos), the top-level flat `inputs.nixpkgs-master.url` form (gomod2nix),
   and a nested sub-attrset form — confirming byte-preservation on each; (3)
@@ -57,14 +60,34 @@ parameter:
 - **New check: `nixpkgs-master`.** Reads `<flake>/flake.nix` alone (no lock)
   and classifies the top-level `nixpkgs-master` input's url against
   `^github:NixOS/nixpkgs/[0-9a-f]{40}$`. A conformant input yields no
-  finding; otherwise one of three failure modes is reported with a precise
+  finding; otherwise one of four failure modes is reported with a precise
   diagnostic:
   - **missing** — no `nixpkgs-master.url` input is declared (a bare
     `X.inputs.nixpkgs-master.follows` override does not count — that is not a
     top-level input declaration);
   - **floating** — a `github:NixOS/nixpkgs` ref not pinned to a full 40-hex
     revision (no rev, a branch/tag name, a short rev, or uppercase hex);
-  - **non-github** — a url that is not a `github:NixOS/nixpkgs` ref at all.
+  - **non-github** — a url that is not a `github:NixOS/nixpkgs` ref at all;
+  - **stale** — a well-formed 40-hex pin naming a revision *other than*
+    `--nixpkgs-master-sha`. Reachable only when that target is supplied;
+    with no target the check is shape-only and any well-formed pin conforms.
+    The diagnostic carries both revisions (pinned and wanted).
+
+  Floating and non-github outrank stale under a target: they are the more
+  specific diagnosis, and the repair rewrites the url to the target either
+  way.
+
+### Why `stale` exists
+
+The check originally accepted *any* 40-hex pin as conformant. That is the
+right shape test but the wrong cascade test: once a repo was pinned at all,
+`--fix` found no finding and rewrote nothing, so eng's update-nix cascade
+no-op'd on every already-pinned repo while reporting success — the fleet sat
+at one stale revision. (The `sed` this lane replaced rewrote the pin
+unconditionally and so never had the bug.) Comparing against the caller's
+target restores the cascade's ability to move a repo forward, while leaving
+the target optional so a plain `lint` still asks only "is this pinned?" and
+not "is this pinned to *my* revision?".
 - **Opt-in, not a default check.** Unlike follows/multi-version/dead-overrides
   (universal reducible-duplication findings), this encodes an amarbel-llc
   *fleet policy* — a specific input pinned a specific way — so a plain `lint`
@@ -77,10 +100,13 @@ parameter:
   `nixpkgs-master.url = "github:NixOS/nixpkgs/<sha>";` is spliced into the
   top-level `inputs` attrset (block or flat form) with the same
   byte-preserving PEG surgery the follows-collapse uses. When it is **present
-  but floating/non-github**, only that url's string literal is rewritten in
-  place. Idempotent: a no-op when already conformant. The sha is a required
-  parameter under `--fix` when the check is selected; `--fix` without it (or
-  with a non-40-hex value) exits `2` before any analysis — fail-loud.
+  but floating/non-github/stale**, only that url's string literal is rewritten
+  in place. Idempotent: a no-op when already pinned to the target. The sha is
+  a required parameter under `--fix` when the check is selected; `--fix`
+  without it exits `2` before any analysis — fail-loud. A *supplied* sha is
+  validated in check mode too (it is the staleness target there), so a
+  non-40-hex value exits `2` rather than silently reporting the whole fleet
+  stale against a malformed target.
 - **Works without a lock.** Because detection needs only `flake.nix`, `lint`
   loads `flake.lock` only when a lock-dependent check
   (follows/multi-version/dead-overrides) is selected. So
@@ -120,6 +146,13 @@ Checking a repo missing the convention:
 nixpkgs-master input missing: declare `nixpkgs-master.url = "github:NixOS/nixpkgs/<40-hex sha>"`
 ```
 
+Checking a repo whose pin lags the fleet revision:
+
+```
+── nixpkgs-master convention ──
+nixpkgs-master stale: pinned to "github:NixOS/nixpkgs/567a49d…875f", want "github:NixOS/nixpkgs/f13ff45…3210"
+```
+
 Repairing it (the cascade's invocation shape):
 
 ```
@@ -147,13 +180,17 @@ cascade members at all) stays a separate filter in eng's clone step.
   via the existing `Apply` (which already handles block vs flat form and
   idempotency). Returns `changed=false` when already equal.
 - **Classification (`internal/alfa/lint`, `ClassifyNixpkgsMaster`).** Pure
-  function over `(url, present)` → `*NixpkgsMasterFinding` (nil when
-  conformant), plus `ValidNixpkgsSHA` and `NixpkgsMasterURL` helpers. No I/O.
+  function over `(url, present, targetSHA)` → `*NixpkgsMasterFinding` (nil
+  when conformant), plus `ValidNixpkgsSHA` and `NixpkgsMasterURL` helpers. No
+  I/O. `targetSHA` threads from the flag through `analyzeFlake` and
+  `nixpkgsMasterFinding`; the post-fix re-analysis passes the same target so
+  its verification is against the revision that was actually requested.
 - **Selection (`internal/alfa/lint`).** `CheckNixpkgsMaster` joins
   `AllChecks`; a new `DefaultChecks` (the original three) backs the
   absent-`--checks` default so the new check is opt-in.
 - **Rendering (`internal/bravo/render`).** A fourth text section, a
-  `nixpkgsMaster` JSON key (`{conformant, status?, url?}`), and a fourth
+  `nixpkgsMaster` JSON key (`{conformant, status?, url?, targetURL?}` —
+  `targetURL` present only for `stale`), and a fourth
   NDJSON `test` record — all gated by the selection like the others.
 - **CLI (`cmd/doppelgang`).** `--nixpkgs-master-sha` flag; upfront validation
   under `--fix`; lock-load made conditional; `nixpkgsMasterFinding` helper;
