@@ -12,20 +12,23 @@ doppelgang - find duplicate packages in a Nix closure and lint flake inputs
 
 *doppelgang lint* [*--flake* _dir_] [*--format* auto|text|json|ndjson] [*--checks* _list_] [*--online*] [*--fix*] [*--nixpkgs-master-sha* _sha_] [*--papi-domain* _domain_]
 
+*doppelgang lint-man* [*--max* _n_] [*--format* auto|text|json] _path_...
+
 *doppelgang version*
 
 # DESCRIPTION
 
-*doppelgang* inspects Nix closures and flake inputs. It answers three
-questions: what is duplicated in a closure and what that waste costs
-(*dupes*), why a given path is in the closure at all (*why*), and what
+*doppelgang* inspects Nix closures, flake inputs, and man pages. It answers
+four questions: what is duplicated in a closure and what that waste costs
+(*dupes*), why a given path is in the closure at all (*why*), what
 reducible duplication or convention drift a flake's input graph carries
-(*lint*).
+(*lint*), and whether a set of man pages' NAME lines keep the contract
+index builders rely on (*lint-man*).
 
 *dupes* and *why* shell out to *nix-store*, *nix path-info*, and *nix
 why-depends*, so those must be on PATH. *lint* is offline by default and
 reads only _flake.lock_ and _flake.nix_; *--online* and *--fix* make it
-impure.
+impure. *lint-man* is offline and read-only.
 
 # COMMANDS
 
@@ -116,9 +119,93 @@ selected check reports a finding, so it can serve as a CI gate. See
 	_linenisgreat.com_. Also read from *PAPI\_DOMAIN*. When absent the
 	check degrades to a no-op.
 
+## lint-man
+
+Checks the NAME section of every page named by its positional arguments
+against the *NAME LINE CONTRACT* below and prints one line per finding:
+
+```
+<path>: <check>: <detail>
+```
+
+for example _.../dodder-transform.1.gz: long: 79 > 72 chars_. Exits
+non-zero when any error-level finding remains, so it can gate a manpath.
+
+Each _path_ is one of:
+
+- a directory, taken as a manpath root: its _man\*/_ section directories
+  are scanned and every page beneath them linted, following symlinks
+  (a nix profile's manpath is a symlink farm). A directory that is itself
+  a section directory (_.../man7_) is accepted, as is one holding scdoc
+  sources (_doc/_).
+- a single rendered page, in man(7) or mdoc(7) source, optionally
+  gzipped.
+- an scdoc(5) source file, _\*.scd_, whose NAME is the _# NAME_ section.
+
+The format is chosen by extension: _.scd_ is scdoc source, anything else a
+rendered page, decompressed when it ends in _.gz_. A path that does not
+exist, or a directory yielding no pages, is an error rather than a clean
+pass.
+
+*--max* _n_
+	Maximum description length in characters (Unicode code points, not
+	bytes). Default _72_.
+
+*--format* auto|text|json
+	Output format. _text_ is the one-line-per-finding form above, with a
+	tally on stderr. _json_ is a single document carrying the budget, the
+	page count, and every finding with its severity. _auto_ (the default)
+	emits text on a TTY and JSON otherwise.
+
 ## version
 
 Print the version and commit burnt into the binary, then exit.
+
+# NAME LINE CONTRACT
+
+whatis(1), apropos(1), and lexgrog(1) read a page's one-line description
+from its NAME section, and so does spinclass's manpage index (spinclass
+FDR 0030), which renders _name(section)_ plus that description for every
+first-party page into each session's system prompt. Generated pages break
+the contract in ways a human author would not: a Go codegen pastes an MCP
+tool's paragraph-long help text as the description, a NAME section lists
+names with no separator at all, or a description is wrapped over two roff
+lines, which lexgrog joins and the index does not, truncating mid-word.
+*lint-man* enforces, per page:
+
+*unparsable*
+	The NAME section must exist and read as _name - description_. Several
+	names may precede the separator, comma-separated (_a, b - desc_), and
+	several entries may follow one another separated by a break or
+	paragraph macro. The separator is a space-delimited dash: _\\-_, _-_,
+	_--_, or an em or en dash, resolved from roff escapes first. mdoc(7)
+	pages use _.Nm_ and _.Nd_. This is the verdict lexgrog(1) reports as
+	"parse failed"; a page that cannot be read or decompressed is reported
+	as *unreadable* instead.
+
+*empty*
+	The description after the separator must be non-empty.
+
+*wrapped*
+	The entry must occupy one physical source line. A description
+	continued on a second line - or, in mdoc, past the _.Nd_ line by text
+	or an inline macro - is a failure regardless of lexgrog's verdict,
+	because the index reads only the first line.
+
+*long*
+	The description, with escapes resolved and font changes stripped,
+	must be at most *--max* characters.
+
+*trailing-period*
+	The description should not end with a period: it is a phrase, not a
+	sentence. This is a warning. It is printed (suffixed _(warning)_ in
+	text, _"severity": "warning"_ in JSON) but never fails the gate on its
+	own.
+
+Every other check is an error and fails the gate. Font escapes such as
+_\\fB_ and character escapes such as _\\-_ and _\\(em_ are resolved before
+the description is measured, so the count is what a reader sees. In scdoc
+source, _\*bold\*_ and _\_underline\__ markers are stripped the same way.
 
 # CHECKS
 
@@ -210,17 +297,19 @@ never leave behind a flake that cannot be evaluated.
 # EXIT STATUS
 
 _0_
-	Success. For *lint*, no selected check reported a finding.
+	Success. For *lint*, no selected check reported a finding. For
+	*lint-man*, no error-level finding; warnings alone still exit _0_.
 
 _1_
 	A selected check reported a finding, or the operation failed at
 	runtime - the closure could not be loaded, _flake.lock_ could not be
-	read, or a *--fix* repair could not be applied.
+	read, a *--fix* repair could not be applied, or a *lint-man* path did
+	not exist or yielded no pages.
 
 _2_
 	Usage error: an unknown subcommand, a missing required argument, an
-	invalid *--scope* or *--format* value, or a missing or malformed
-	*--nixpkgs-master-sha* where one is required.
+	invalid *--scope*, *--format*, or *--max* value, or a missing or
+	malformed *--nixpkgs-master-sha* where one is required.
 
 # ENVIRONMENT
 
@@ -274,6 +363,13 @@ Detect a stale pin without repairing it:
 doppelgang lint --checks nixpkgs-master --nixpkgs-master-sha 567a49d1913ce81ac6e9582e3553dd90a955875f
 ```
 
+Gate a repo's own scdoc sources, then a whole rendered manpath:
+
+```
+doppelgang lint-man doc/*.scd
+doppelgang lint-man ~/.local/share/first-party-manpages/linenisgreat/man
+```
+
 # SEE ALSO
 
-*eng*(7), *nix*(1)
+*eng*(7), *eng-manpages*(7), *lexgrog*(1), *nix*(1), *scdoc*(5)

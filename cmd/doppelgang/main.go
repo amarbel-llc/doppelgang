@@ -20,6 +20,7 @@ import (
 	"code.linenisgreat.com/doppelgang/internal/alfa/attribute"
 	"code.linenisgreat.com/doppelgang/internal/alfa/dupes"
 	"code.linenisgreat.com/doppelgang/internal/alfa/lint"
+	"code.linenisgreat.com/doppelgang/internal/alfa/manlint"
 	"code.linenisgreat.com/doppelgang/internal/bravo/render"
 )
 
@@ -49,6 +50,8 @@ func main() {
 		os.Exit(whyMain(ctx, flag.Args()[1:]))
 	case "lint":
 		os.Exit(lintMain(ctx, flag.Args()[1:]))
+	case "lint-man":
+		os.Exit(lintManMain(flag.Args()[1:]))
 	case "version":
 		fmt.Printf("doppelgang %s (%s)\n", version, commit)
 		return
@@ -69,6 +72,7 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "                  [--checks follows,multi-version,dead-overrides,nixpkgs-master,canonical-inputs]\n")
 	fmt.Fprintf(os.Stderr, "                  [--online] [--fix] [--nixpkgs-master-sha <40-hex>]\n")
 	fmt.Fprintf(os.Stderr, "                  [--papi-domain <domain>]\n")
+	fmt.Fprintf(os.Stderr, "  doppelgang lint-man [--max N] [--format auto|text|json] <manpath-root|page|file.scd>...\n")
 	fmt.Fprintf(os.Stderr, "  doppelgang version\n\n")
 	fmt.Fprintf(os.Stderr, "Defaults: --installable=./result, --scope=runtime (dupes) or build (why), --top=25.\n")
 	fmt.Fprintf(os.Stderr, "`lint` reads <flake>/flake.lock and recommends `follows` for duplicate-source\n")
@@ -101,6 +105,12 @@ func topUsage() {
 	fmt.Fprintf(os.Stderr, "and does NOT re-lock — locking is left to the caller (the cascade's nix flake\n")
 	fmt.Fprintf(os.Stderr, "update). --papi-domain sets the identity domain for the papi call (also read from\n")
 	fmt.Fprintf(os.Stderr, "PAPI_DOMAIN env var); when absent the check degrades gracefully to no-op.\n")
+	fmt.Fprintf(os.Stderr, "`lint-man` checks man page NAME sections — rendered pages under a manpath root\n")
+	fmt.Fprintf(os.Stderr, "(man1/, man7/, ... beneath, .gz allowed), single pages, or scdoc *.scd sources —\n")
+	fmt.Fprintf(os.Stderr, "for the `name - description` contract index builders such as spinclass's manpage\n")
+	fmt.Fprintf(os.Stderr, "index rely on: parsable, non-empty, on one source line, at most --max chars\n")
+	fmt.Fprintf(os.Stderr, "(default 72); a trailing period is a warning. One `<path>: <check>: <detail>`\n")
+	fmt.Fprintf(os.Stderr, "line per finding; exits 1 on any error-level finding.\n")
 	fmt.Fprintf(os.Stderr, "If `why` is given a /nix/store/... path, it traces that path directly without\n")
 	fmt.Fprintf(os.Stderr, "scanning the closure. Otherwise the argument is treated as a name regex.\n")
 	fmt.Fprintf(os.Stderr, "Requires nix-store, nix path-info, nix why-depends on PATH.\n")
@@ -964,6 +974,83 @@ func stageFixedFiles(flakeDir string) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "doppelgang lint --fix: could not stage %v (%v); stage them yourself\n", paths, err)
+	}
+}
+
+// lintManMain runs `doppelgang lint-man`: lint the NAME section of every
+// page the positional arguments name against the index-builder contract
+// (see manlint), print one line per finding, and exit 1 when any
+// error-level finding remains. Warnings (a trailing period) are printed but
+// never fail the gate. Everything is offline and read-only.
+func lintManMain(args []string) int {
+	fs := flag.NewFlagSet("lint-man", flag.ExitOnError)
+	maxDesc := fs.Int("max", manlint.DefaultMaxDescription, "maximum NAME description length in characters")
+	format := fs.String("format", "auto", "output format: auto, text, or json (auto = text on a TTY, json otherwise)")
+	_ = fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint-man: missing argument (manpath root, page, or *.scd source)\n\n")
+		topUsage()
+		return 2
+	}
+	if *maxDesc <= 0 {
+		fmt.Fprintf(os.Stderr, "doppelgang lint-man: --max must be positive, got %d\n", *maxDesc)
+		return 2
+	}
+	resolved, err := resolveLintManFormat(*format, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint-man: %v\n", err)
+		return 2
+	}
+
+	pages, err := manlint.CollectPages(fs.Args())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doppelgang lint-man: %v\n", err)
+		return 1
+	}
+	findings := manlint.LintPages(pages, *maxDesc)
+	sum := render.ManLintSummary{Max: *maxDesc, Pages: len(pages), Findings: findings}
+
+	var renderErr error
+	switch resolved {
+	case "text":
+		renderErr = render.ManLintText(os.Stdout, sum)
+		// The tally goes to stderr so stdout stays one finding per line.
+		errors, warnings := 0, 0
+		for _, f := range findings {
+			if f.Severity == manlint.SeverityWarning {
+				warnings++
+			} else {
+				errors++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "doppelgang lint-man: %d page(s) checked, %d error(s), %d warning(s)\n", len(pages), errors, warnings)
+	case "json":
+		renderErr = render.ManLintJSON(os.Stdout, sum)
+	}
+	if renderErr != nil {
+		return errExit(renderErr)
+	}
+	if manlint.HasErrors(findings) {
+		return 1
+	}
+	return 0
+}
+
+// resolveLintManFormat maps lint-man's --format value to a renderer. Unlike
+// lint there is no tap NDJSON here: the findings are flat, so "auto" picks
+// text on a TTY and plain JSON otherwise.
+func resolveLintManFormat(format string, out *os.File) (string, error) {
+	switch format {
+	case "text", "json":
+		return format, nil
+	case "auto", "":
+		if isTerminal(out) {
+			return "text", nil
+		}
+		return "json", nil
+	default:
+		return "", fmt.Errorf("--format must be auto, text, or json, got %q", format)
 	}
 }
 

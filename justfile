@@ -1,6 +1,6 @@
 default: lint build test
 
-lint: lint-fmt lint-worktree lint-flake
+lint: lint-fmt lint-worktree lint-flake lint-man
 
 build: build-gomod2nix build-nix
 
@@ -191,6 +191,47 @@ explore-lint-checks DIR CHECKS *ARGS: build-nix
 [group('explore')]
 explore-lint-nixpkgs-master DIR SHA: build-nix
   ./result/bin/doppelgang lint --flake {{DIR}} --checks nixpkgs-master --fix --nixpkgs-master-sha {{SHA}} --format text; echo "exit=$?"
+
+# Print the NAME section of a rendered page (gz or plain) so the roff shapes
+# `lint-man` must parse can be eyeballed. Usage: just debug-man-name-section PATH
+#
+# print a rendered page's NAME section
+[group('debug')]
+debug-man-name-section PATH:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [[ "{{PATH}}" == *.gz ]]; then zcat "{{PATH}}"; else cat "{{PATH}}"; fi \
+    | sed -n '/^\.S[Hh][ \t]*"\{0,1\}NAME/,/^\.S[Hh][ \t]*"\{0,1\}[A-Z]/p' | head -40
+
+# Run lexgrog(1), the man-db reference NAME parser, over every page under a
+# manpath root. `lint-man`'s parsable/unparsable verdicts must agree with it;
+# this is the acceptance check for that. Usage: just debug-lexgrog-corpus ROOT
+#
+# run lexgrog over every page under a manpath root
+[group('debug')]
+debug-lexgrog-corpus ROOT:
+  #!/usr/bin/env bash
+  set -uo pipefail
+  find -L {{ROOT}}/man* -type f | sort | while read -r f; do lexgrog "$f" 2>&1 || true; done
+
+# Run `doppelgang lint-man` against a manpath root, page, or scdoc source and
+# report the exit code. The fleet acceptance run is
+#   just explore-lint-man ~/.local/share/first-party-manpages/linenisgreat/man
+# whose findings must agree with `debug-lexgrog-corpus` on parsability.
+# Extra flags go after `--` (see explore-lint-checks for the separator note).
+#
+# run `doppelgang lint-man` against a manpath root or scdoc source
+[group('explore')]
+explore-lint-man TARGET *ARGS: build-nix
+  ./result/bin/doppelgang lint-man --format text {{ trim_start_match(ARGS, "-- ") }} {{ TARGET }}; echo "exit=$?"
+
+# Self-consume: lint this repo's own scdoc NAME lines. Fails `just` (via
+# `lint`) when a page's NAME line breaks the index-builder contract.
+#
+# run `doppelgang lint-man` against this repo's own doc/*.scd
+[group('lint')]
+lint-man: build-nix
+  ./result/bin/doppelgang lint-man doc
 
 # Render a man page for inspection after editing its scdoc source in doc/.
 # The pages themselves are built by nix, never by a recipe (eng-manpages(7)):

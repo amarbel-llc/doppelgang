@@ -15,6 +15,7 @@ doppelgang lint [--flake .] [--format auto|text|json|ndjson]
                           canonical-inputs,canonical-form,outputs-participation]
                 [--online] [--fix] [--nixpkgs-master-sha <40-hex>]
                 [--papi-domain <domain>]
+doppelgang lint-man [--max N] [--format auto|text|json] <manpath-root|page|file.scd>...
 doppelgang version
 ```
 
@@ -184,6 +185,38 @@ added) — so it announces them as the first record, and the summary's
 
 `lint` exits `1` when any *selected* check reports a finding, so it can run in
 CI as a gate against new input duplication and rot (over the chosen subset).
+
+`lint-man` checks man page NAME sections against the contract index builders
+rely on. whatis/lexgrog read a page's one-line description from `name -
+description` in NAME, and so does spinclass's manpage index (spinclass FDR
+0030), which renders every first-party page's name and description into each
+session's system prompt. Generated pages break that contract in ways a human
+would not: MCP tool help text pasted in as a 1,200-character description, a
+NAME that lists names with no separator, or a description wrapped over two
+roff lines (lexgrog joins them; the index reads only the first and truncates
+mid-word). Per page, `lint-man` requires:
+
+- **unparsable** — a NAME section that reads as `name - description`
+  (multiple comma-separated names allowed; the separator is a
+  space-delimited `\-`, `-`, `--`, or em/en dash; mdoc `.Nm`/`.Nd` too). Same
+  verdict as lexgrog's "parse failed". A page that cannot be read or
+  decompressed is **unreadable**.
+- **empty** — a non-empty description.
+- **wrapped** — the entry on one physical source line. Fails regardless of
+  lexgrog's verdict, since the index does not join lines.
+- **long** — at most `--max` characters (default 72), measured after roff
+  escapes are resolved and font changes stripped.
+- **trailing-period** — a warning only: printed, never fails the gate.
+
+Inputs are positional and auto-detected by extension: a directory is a
+manpath root (`man1/`, `man7/`, … beneath, pages possibly `.gz`, symlinks
+followed; a bare section directory or a directory of `*.scd` sources also
+works), a `*.scd` file is scdoc source (`# NAME` section), anything else a
+rendered page. Output is one `<path>: <check>: <detail>` line per finding
+(e.g. `…/dodder-transform.1.gz: long: 79 > 72 chars`); `--format auto`
+picks text on a TTY and JSON otherwise. Exits `1` on any error-level
+finding, `0` when only warnings remain. `just lint-man` runs it over this
+repo's own `doc/*.scd` as part of `just lint`.
 
 `version` prints the burnt-in `<version> (<commit>)` injected at build time
 by the amarbel-llc/nixpkgs `buildGoApplication` overlay.
