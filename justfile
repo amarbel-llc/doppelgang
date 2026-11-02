@@ -266,6 +266,35 @@ explore-static-evidence:
   "$bin" lint-man --format text "$tmp/good"; echo "good exit=$?"
   "$bin" lint-man --format text "$tmp/bad"; echo "bad exit=$?"
 
+# List every /nix/store path string embedded in the static binary, with
+# counts, to locate where survivors come from (debug info, embedded
+# toolchain paths). Serves the release-asset dev-loop (conformist#114).
+#
+# show /nix/store path strings that survive in the static binary
+[group('debug')]
+debug-static-store-strings:
+  #!/usr/bin/env bash
+  set -uo pipefail
+  out=$(nix build --no-link --print-out-paths '.#doppelgang-static')
+  bin="$out/bin/doppelgang"
+  echo "== distinct store paths (count) =="
+  rg -a -o '/nix/store/[a-z0-9]{32}-[A-Za-z0-9._+-]+' "$bin" | sort | uniq -c | sort -rn
+  echo "== context (first 40) =="
+  rg -a -o '.{0,60}/nix/store/[a-z0-9]{32}-.{0,60}' "$bin" | head -40
+
+# Build packages.doppelgang-static-aarch64 and show it is a static ARM aarch64
+# ELF with no store references. Serves the aarch64 release asset (conformist#114).
+#
+# build the aarch64 static binary and show its ELF identity
+[group('explore')]
+explore-static-aarch64:
+  #!/usr/bin/env bash
+  set -uo pipefail
+  out=$(nix build --no-link --print-out-paths --print-build-logs '.#doppelgang-static-aarch64')
+  ls -l "$out/bin"
+  file -L "$out/bin/doppelgang" || true
+  nix path-info -r "$out"
+
 # Tag a doppelgang release. The "v" prefix is added for you, so pass the
 # semver without it. Usage: just tag 0.1.0 "feat: initial release"
 #
@@ -372,7 +401,7 @@ deploy-release sha=env_var_or_default("SPINCLASS_MERGED_SHA", "HEAD"):
 
 # Attach doppelgang's portable static binary (packages.doppelgang-static) to the
 # forge release for version.env's version, as doppelgang-static-x86_64-linux
-# (aarch64 is not built yet). Idempotent: no release for the version is a clean
+# and doppelgang-static-aarch64-linux. Idempotent: no release for the version is a clean
 # no-op, and an asset already attached is skipped. Uses smith's ambient forge auth.
 # Run by `deploy-release` (the `release` post-merge target).
 #
@@ -399,9 +428,15 @@ deploy-release-assets version="":
         echo "deploy-release-assets: v$ver predates doppelgang-static; nothing to attach"
         exit 0
     fi
-    for pair in "doppelgang-static:x86_64-linux"; do
+    # attr:asset-suffix. The aarch64 binary is Go-cross-compiled (CGO off), so
+    # it builds on the x86_64-linux host; a tag that predates an attr skips it.
+    for pair in "doppelgang-static:x86_64-linux" "doppelgang-static-aarch64:aarch64-linux"; do
         attr="${pair%%:*}"
         asset="doppelgang-static-${pair##*:}"
+        if [ "$(nix eval "$flake#packages.$system" --apply "p: p ? $attr")" != true ]; then
+            echo "deploy-release-assets: v$ver has no $attr; skipping $asset"
+            continue
+        fi
         if grep -qxF -- "• $asset" <<<"$view" || grep -qF -- " $asset" <<<"$view"; then
             echo "deploy-release-assets: $asset already attached to $release"
             continue

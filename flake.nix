@@ -127,6 +127,23 @@
           allowedReferences = [ ];
         });
 
+        # aarch64-linux static release binary, cross-compiled by Go itself
+        # (pure Go, CGO off, so no C cross toolchain). `go install` with a
+        # foreign GOARCH puts the binary under bin/linux_arm64/, so hoist it.
+        # Built on x86_64-linux only.
+        doppelgangStaticAarch64 = doppelgangStatic.overrideAttrs (old: {
+          pname = "doppelgang-static-aarch64";
+          GOOS = "linux";
+          GOARCH = "arm64";
+          postInstall = ''
+            if [ -d "$out/bin/linux_arm64" ]; then
+              mv "$out/bin/linux_arm64"/* "$out/bin/"
+              rmdir "$out/bin/linux_arm64"
+            fi
+          ''
+          + old.postInstall;
+        });
+
         # Man pages, compiled from the scdoc sources in ./doc. Kept a separate
         # derivation from the Go build (rather than a postInstall on it) so
         # editing a man page does not bust the Go derivation's hash — the same
@@ -184,6 +201,7 @@
           # binary's closure.
           doppelgang-doc = doppelgangDoc;
           doppelgang-static = doppelgangStatic;
+          doppelgang-static-aarch64 = doppelgangStaticAarch64;
           conformist-impure-config = conformistImpureEval.config.build.configFile;
           # The raw conformist binary, so `just lint-worktree` can
           # `nix run .#conformist -- check ...` instead of resolving
