@@ -244,6 +244,28 @@ lint-man: build-nix
 explore-man PAGE="doppelgang.1": build-nix
   man -l "result/share/man/man1/{{PAGE}}.gz"
 
+# Build packages.doppelgang-static (fails if any store path survives in the
+# binary, via allowedReferences = []), show that it is static, and run
+# `lint-man` from it against a known-good (doc/) and a known-bad scdoc page.
+# Serves the release-asset dev-loop (conformist#114).
+#
+# build the static binary and prove it is static and runs lint-man
+[group('explore')]
+explore-static-evidence:
+  #!/usr/bin/env bash
+  set -uo pipefail
+  out=$(nix build --no-link --print-out-paths --print-build-logs '.#doppelgang-static')
+  bin="$out/bin/doppelgang"
+  file -L "$bin" || true
+  ldd "$bin" 2>&1 || true
+  nix path-info -r "$bin"
+  tmp=$(mktemp -d)
+  mkdir "$tmp/good" "$tmp/bad"
+  cp doc/*.1.scd "$tmp/good/"
+  printf 'bad(1)\n\n# NAME\n\nbad - %s\n' "$(printf 'x%.0s' $(seq 1 100))" > "$tmp/bad/bad.1.scd"
+  "$bin" lint-man --format text "$tmp/good"; echo "good exit=$?"
+  "$bin" lint-man --format text "$tmp/bad"; echo "bad exit=$?"
+
 # Tag a doppelgang release. The "v" prefix is added for you, so pass the
 # semver without it. Usage: just tag 0.1.0 "feat: initial release"
 #
@@ -280,6 +302,115 @@ bump-version new_version:
     fi
     sed -i.bak 's/DOPPELGANG_VERSION='"$current"'/DOPPELGANG_VERSION={{new_version}}/' version.env && rm version.env.bak
     gum log --level info "bumped DOPPELGANG_VERSION: $current → {{new_version}}"
+
+# Bump version.env by one semver level (bugfix, minor or major) and commit it as
+# "release vX.Y.Z" on the current branch, BEFORE merging. The `release`
+# post-merge target (just deploy-release) then tags the merged commit, creates
+# the forge release and attaches the static binary. `bump-version` itself stays
+# the pure mutation.
+#
+# bump version.env by one semver level and commit the release bump
+bump-version-level level:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . version.env
+    cur="${DOPPELGANG_VERSION:?missing DOPPELGANG_VERSION in version.env}"
+    IFS=. read -r major minor patch <<<"$cur"
+    case "{{ level }}" in
+        bugfix) patch=$((patch + 1)) ;;
+        minor) minor=$((minor + 1)); patch=0 ;;
+        major) major=$((major + 1)); minor=0; patch=0 ;;
+        *) echo "bump-version-level: level must be bugfix, minor or major (got '{{ level }}')" >&2; exit 1 ;;
+    esac
+    new="$major.$minor.$patch"
+    just bump-version "$new"
+    git add version.env
+    git commit -m "release v$new"
+    echo "bump-version-level: committed release v$new; merging runs the release post-merge target"
+
+# Publish the release for the version a merge landed, run by the `release`
+# post-merge target. Reads version.env from the MERGED commit (SHA, default
+# $SPINCLASS_MERGED_SHA). If its tag already exists it only ensures the assets, so
+# every merge is a safe no-op until a new version is committed. Otherwise:
+# changelog since the previous tag (minus the bump commit), a signed annotated
+# tag on the merged commit (needs the signing agent), the forge release via
+# smith, then the asset.
+#
+# tag, publish and attach assets for the version a merge landed
+deploy-release sha=env_var_or_default("SPINCLASS_MERGED_SHA", "HEAD"):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch --tags origin
+    sha=$(git rev-parse "{{ sha }}^{commit}")
+    ver=$(git show "$sha:version.env" | sed -n 's/^export DOPPELGANG_VERSION=//p')
+    [ -n "$ver" ] || { echo "deploy-release: no DOPPELGANG_VERSION in version.env at $sha" >&2; exit 1; }
+    tag="v$ver"
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+        echo "deploy-release: $tag already exists; ensuring its assets"
+        just deploy-release-assets "$ver"
+        exit 0
+    fi
+
+    header="release $tag"
+    prev=$(git tag --sort=-v:refname -l 'v*' --merged "$sha" | sed -n 1p)
+    if [ -n "$prev" ]; then
+        # The bump commit is named "$header"; it MUST NOT appear in the changelog
+        # it announces (eng-versioning(7)).
+        summary=$(git log --format='- %s' "$prev..$sha" | grep -vxF -- "- $header" || true)
+        msg="$header"$'\n\n'"$summary"
+    else
+        msg="$header"
+    fi
+
+    git tag -s -m "$msg" "$tag" "$sha"
+    git push origin "refs/tags/$tag"
+    git tag -v "$tag"
+
+    smith -H forge.starbrandshoes.com release -r linenisgreat/doppelgang \
+        create "$header" --tag "$tag" --body "$msg"
+    just deploy-release-assets "$ver"
+
+# Attach doppelgang's portable static binary (packages.doppelgang-static) to the
+# forge release for version.env's version, as doppelgang-static-x86_64-linux
+# (aarch64 is not built yet). Idempotent: no release for the version is a clean
+# no-op, and an asset already attached is skipped. Uses smith's ambient forge auth.
+# Run by `deploy-release` (the `release` post-merge target).
+#
+# attach the static release binaries to the current version's forge release
+deploy-release-assets version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . version.env
+    ver="{{ version }}"
+    ver="${ver:-${DOPPELGANG_VERSION:?missing DOPPELGANG_VERSION in version.env}}"
+    release="release v$ver"
+    smith_release=(smith -H forge.starbrandshoes.com release -r linenisgreat/doppelgang)
+    if ! view=$("${smith_release[@]}" view --by-tag "v$ver" 2>/dev/null); then
+        echo "deploy-release-assets: no forge release for v$ver yet; nothing to attach"
+        exit 0
+    fi
+    # Build from the release's TAG, never the checkout: an asset must be the
+    # binary its tag's source produces. A tag older than doppelgang-static
+    # cannot produce one, so it gets none.
+    rev=$(git rev-parse "v$ver^{commit}")
+    flake="git+file://$(git rev-parse --show-toplevel)?rev=$rev"
+    system=$(nix eval --impure --raw --expr builtins.currentSystem)
+    if [ "$(nix eval "$flake#packages.$system" --apply 'p: p ? doppelgang-static')" != true ]; then
+        echo "deploy-release-assets: v$ver predates doppelgang-static; nothing to attach"
+        exit 0
+    fi
+    for pair in "doppelgang-static:x86_64-linux"; do
+        attr="${pair%%:*}"
+        asset="doppelgang-static-${pair##*:}"
+        if grep -qxF -- "• $asset" <<<"$view" || grep -qF -- " $asset" <<<"$view"; then
+            echo "deploy-release-assets: $asset already attached to $release"
+            continue
+        fi
+        out=$(nix build --no-link --print-out-paths "$flake#$attr")
+        bin=$(find "$out/bin" -type f -name doppelgang -print -quit)
+        [ -n "$bin" ] || { echo "deploy-release-assets: no doppelgang binary in $out/bin" >&2; exit 1; }
+        "${smith_release[@]}" asset create "$release" "$bin" "$asset"
+    done
 
 # Cut a release: must be run on master. Bumps DOPPELGANG_VERSION in version.env,
 # commits the bump with a changelog-style message built from commits since

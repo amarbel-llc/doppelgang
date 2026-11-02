@@ -95,6 +95,38 @@
           CGO_ENABLED = "0";
         };
 
+        # doppelgang as a portable static release binary, published as a forge
+        # release asset by `just deploy-release-assets` (the `release`
+        # post-merge target). Pure-Go net/user, stripped, and
+        # allowedReferences = [] so the build fails if any /nix/store path
+        # survives in the binary. x86_64-linux only for now.
+        doppelgangStatic = doppelgangBin.overrideAttrs (old: {
+          pname = "doppelgang-static";
+          tags = [
+            "netgo"
+            "osusergo"
+          ];
+          ldflags = (old.ldflags or [ ]) ++ [
+            "-s"
+            "-w"
+          ];
+          doCheck = false;
+          # nixpkgs' Go patches embed three data paths. tzdata and mailcap are
+          # prepended to Go's search lists, so stripping them falls back to
+          # /usr/share/zoneinfo and /etc/mime.types. iana-etc REPLACES
+          # /etc/services and /etc/protocols; stripped, those lookups fall
+          # back to net's built-in tables.
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.removeReferencesTo ];
+          postInstall = (old.postInstall or "") + ''
+            find "$out/bin" -type f -exec remove-references-to \
+              -t ${pkgs.tzdata} \
+              -t ${pkgs.mailcap} \
+              -t ${pkgs.iana-etc} \
+              {} +
+          '';
+          allowedReferences = [ ];
+        });
+
         # Man pages, compiled from the scdoc sources in ./doc. Kept a separate
         # derivation from the Go build (rather than a postInstall on it) so
         # editing a man page does not bust the Go derivation's hash — the same
@@ -151,6 +183,7 @@
           # The man pages alone, for consumers that want the docs without the
           # binary's closure.
           doppelgang-doc = doppelgangDoc;
+          doppelgang-static = doppelgangStatic;
           conformist-impure-config = conformistImpureEval.config.build.configFile;
           # The raw conformist binary, so `just lint-worktree` can
           # `nix run .#conformist -- check ...` instead of resolving
